@@ -57,7 +57,11 @@ func (m *Manager) logNotification(ntype protocol.Notify, extra any, packet []byt
 	switch ntype {
 	case protocol.NotifyNewHR:
 		if v, ok := extra.(int); ok {
-			m.logger.Info("heart-rate notification", "bpm", v)
+			if v == 0 {
+				m.logger.Debug("heart-rate notification", "bpm", v)
+			} else {
+				m.logger.Info("heart-rate notification", "bpm", v)
+			}
 			return
 		}
 	case protocol.NotifyNewSpO2:
@@ -87,7 +91,7 @@ func (m *Manager) logNotification(ntype protocol.Notify, extra any, packet []byt
 func applyNotification(data *DeviceData, ntype protocol.Notify, extra any) {
 	switch ntype {
 	case protocol.NotifyNewHR:
-		if v, ok := extra.(int); ok {
+		if v, ok := extra.(int); ok && v > 0 {
 			data.HeartRate = v
 		}
 	case protocol.NotifyNewSpO2:

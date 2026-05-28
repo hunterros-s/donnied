@@ -173,6 +173,7 @@ func (m *Manager) GetSpO2(ctx context.Context, daysAgo int) ([]protocol.SpO2Day,
 // snapshot cache.
 func (m *Manager) ReadRealtime(ctx context.Context, rt protocol.RtType) (*protocol.RtReading, error) {
 	start := time.Now()
+	calibrationSamples := 0
 	m.logger.Info("requesting realtime reading", "type", rt.String())
 
 	defer func() {
@@ -203,7 +204,7 @@ func (m *Manager) ReadRealtime(ctx context.Context, rt protocol.RtType) (*protoc
 					return false, nil, nil
 				}
 				if v.Value == 0 && (rt == protocol.RtHeartRate || rt == protocol.RtSpO2) {
-					m.logger.Debug("ignoring realtime calibration sample", "type", rt.String())
+					calibrationSamples++
 					return false, nil, nil
 				}
 				return true, &v, nil
@@ -220,7 +221,7 @@ func (m *Manager) ReadRealtime(ctx context.Context, rt protocol.RtType) (*protoc
 		return nil, fmt.Errorf("no realtime reading returned")
 	}
 	reading := result.(*protocol.RtReading)
-	m.logger.Info("realtime reading received", "type", rt.String(), "value", reading.Value, "duration", time.Since(start).Round(time.Millisecond))
+	m.logger.Info("realtime reading received", "type", rt.String(), "value", reading.Value, "calibration_samples", calibrationSamples, "duration", time.Since(start).Round(time.Millisecond))
 	return reading, nil
 }
 
