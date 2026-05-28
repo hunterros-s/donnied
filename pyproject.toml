@@ -1,0 +1,14 @@
+[project]
+name = "smartwatch-daemon"
+version = "0.1.0"
+description = "Daemon for syncing data from a Y25/RS25 smartwatch via BLE"
+requires-python = ">=3.11"
+dependencies = [
+    "bleak>=0.22",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    "aiosqlite>=0.20",
+]
+
+[project.scripts]
+smartwatch = "cli:main"

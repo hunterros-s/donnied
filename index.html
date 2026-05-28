@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Smartwatch</title>
+<style>
+  body { font: 14px -apple-system, system-ui, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.1rem; margin: 0 0 1rem; }
+  h2 { font-size: 0.75rem; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.06em; margin: 1.5rem 0 0.5rem; }
+  .card { border: 1px solid #e3e3e3; border-radius: 6px; padding: 0.9rem 1rem; background: #fafafa; }
+  .row { display: flex; justify-content: space-between; padding: 0.2rem 0; }
+  .row .k { color: #666; }
+  .row .v { font-family: ui-monospace, SFMono-Regular, monospace; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; vertical-align: middle; background: #ccc; }
+  .dot.on { background: #2ecc71; }
+  button { font: inherit; padding: 0.4rem 0.8rem; border: 1px solid #bbb; background: white; border-radius: 4px; cursor: pointer; margin: 0 0.3rem 0.3rem 0; }
+  button:hover { background: #f0f0f0; }
+  .session { padding: 0.5rem 0; border-bottom: 1px solid #eaeaea; }
+  .session:last-child { border-bottom: none; }
+  .stages { font-family: ui-monospace, monospace; color: #555; font-size: 0.85rem; margin-top: 0.2rem; }
+  .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 0.3rem; background: #eee; }
+  .seg-light { background: #9ec5fe; }
+  .seg-deep { background: #4263c5; }
+  .seg-REM { background: #b197fc; }
+  .seg-awake { background: #ffc078; }
+  .log { font-family: ui-monospace, monospace; font-size: 12px; max-height: 320px; overflow-y: auto; }
+  .log div { padding: 0.12rem 0; border-bottom: 1px solid #efefef; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log .ts { color: #aaa; }
+  .log .kind { color: #888; display: inline-block; min-width: 90px; }
+  .controls label { font-size: 0.85rem; color: #666; margin-left: 0.5rem; }
+  .empty { color: #999; font-style: italic; }
+</style>
+</head>
+<body>
+
+<h1>Smartwatch</h1>
+
+<h2>Status</h2>
+<div class="card">
+  <div class="row"><span class="k"><span id="dot" class="dot"></span>Connection</span><span id="connected" class="v">—</span></div>
+  <div class="row"><span class="k">Battery</span><span id="battery" class="v">—</span></div>
+  <div class="row"><span class="k">Last HR</span><span id="lastHr" class="v">—</span></div>
+  <div class="row"><span class="k">Last SpO2</span><span id="lastSpo2" class="v">—</span></div>
+  <div class="row"><span class="k">Activity</span><span id="lastActivity" class="v">—</span></div>
+  <div class="row"><span class="k">Last error</span><span id="lastError" class="v">—</span></div>
+</div>
+
+<h2>Controls</h2>
+<div class="card controls">
+  <button data-action="battery">Battery</button>
+  <button data-action="hr_start">HR start</button>
+  <button data-action="hr_stop">HR stop</button>
+  <button data-action="spo2_start">SpO2 start</button>
+  <button data-action="spo2_stop">SpO2 stop</button>
+  <button data-action="sleep_fetch">Fetch sleep</button>
+</div>
+
+<h2>Sleep</h2>
+<div class="card" id="sleepCard"><div class="empty">No sleep data yet. Click "Fetch sleep".</div></div>
+
+<h2>Events
+  <label><input type="checkbox" id="showRaw"> show raw</label>
+</h2>
+<div class="card log" id="log"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const STAGE_NAMES = { 2: "light", 3: "deep", 4: "REM", 5: "awake" };
+
+const fmtTime = iso => new Date(iso).toLocaleTimeString();
+const fmtDT = iso => {
+  const d = new Date(iso);
+  return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+};
+
+function renderSnapshot(s) {
+  $("dot").classList.toggle("on", !!s.connected);
+  $("connected").textContent = s.connected ? "connected" : "disconnected";
+  $("battery").textContent = s.battery != null ? `${s.battery}%${s.charging ? " ⚡" : ""}` : "—";
+  $("lastHr").textContent = s.last_hr != null ? `${s.last_hr} bpm` : "—";
+  $("lastSpo2").textContent = s.last_spo2 != null ? `${s.last_spo2}%` : "—";
+  $("lastActivity").textContent = s.last_steps != null
+    ? `${s.last_steps} steps · ${s.last_calories} cal · ${s.last_distance} m`
+    : "—";
+  $("lastError").textContent = s.last_error || "—";
+  if (s.last_sleep) renderSleep(s.last_sleep);
+}
+
+function renderSleep(sessions) {
+  const card = $("sleepCard");
+  if (!sessions || sessions.length === 0) {
+    card.innerHTML = '<div class="empty">Watch returned no sleep sessions.</div>';
+    return;
+  }
+  card.innerHTML = sessions.map(s => {
+    const total = s.stages.reduce((a, st) => a + st.minutes, 0) || 1;
+    const bar = s.stages.map(st => {
+      const name = STAGE_NAMES[st.stage] || `s${st.stage}`;
+      const pct = (st.minutes / total) * 100;
+      return `<div class="seg-${name}" style="width:${pct}%"></div>`;
+    }).join("");
+    const stageList = s.stages
+      .map(st => `${STAGE_NAMES[st.stage] || st.stage}: ${st.minutes}m`)
+      .join(" · ");
+    return `
+      <div class="session">
+        <div>${fmtDT(s.start)} → ${fmtDT(s.end)} <span style="color:#888">(${total} min)</span></div>
+        <div class="bar">${bar}</div>
+        <div class="stages">${stageList || "<no stages>"}</div>
+      </div>`;
+  }).join("");
+}
+
+function appendLog(kind, ts, payload) {
+  if (!$("showRaw").checked && (kind === "raw_v1" || kind === "raw_v2")) return;
+  const el = document.createElement("div");
+  const str = typeof payload === "object" ? JSON.stringify(payload) : String(payload);
+  el.innerHTML = `<span class="ts">${fmtTime(ts)}</span> <span class="kind">[${kind}]</span> ${str}`;
+  const log = $("log");
+  log.insertBefore(el, log.firstChild);
+  while (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+// React to each event kind individually — no need to refetch /state
+function applyEvent(kind, payload) {
+  switch (kind) {
+    case "connected":
+      $("dot").classList.add("on");
+      $("connected").textContent = "connected";
+      $("lastError").textContent = "—";
+      break;
+    case "disconnected":
+      $("dot").classList.remove("on");
+      $("connected").textContent = "disconnected";
+      break;
+    case "battery":
+      $("battery").textContent = `${payload.level}%${payload.charging ? " ⚡" : ""}`;
+      break;
+    case "hr":
+      $("lastHr").textContent = `${payload} bpm`;
+      break;
+    case "spo2":
+      $("lastSpo2").textContent = `${payload}%`;
+      break;
+    case "activity":
+      $("lastActivity").textContent =
+        `${payload.steps} steps · ${payload.calories} cal · ${payload.distance} m`;
+      break;
+    case "sleep":
+      renderSleep(payload);
+      break;
+    case "error":
+      $("lastError").textContent = payload;
+      break;
+  }
+}
+
+// Buttons
+for (const b of document.querySelectorAll("button[data-action]")) {
+  b.addEventListener("click", () => {
+    fetch("/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: b.dataset.action }),
+    });
+  });
+}
+
+// Initial snapshot
+fetch("/state").then(r => r.json()).then(renderSnapshot);
+
+// Live stream
+const es = new EventSource("/stream");
+for (const kind of ["connected", "disconnected", "battery", "hr", "spo2", "activity",
+                    "error", "sleep", "notify", "rt_error", "rt", "unknown",
+                    "raw_v1", "raw_v2"]) {
+  es.addEventListener(kind, e => {
+    const { ts, payload } = JSON.parse(e.data);
+    appendLog(kind, ts, payload);
+    applyEvent(kind, payload);
+  });
+}
+</script>
+
+</body>
+</html>

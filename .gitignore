@@ -1,0 +1,4 @@
+events.db
+.state.json
+__pycache__/
+.venv/
