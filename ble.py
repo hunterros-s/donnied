@@ -113,10 +113,10 @@ async def run(
             client = await _connect()
             event_bus.put_nowait(Event("connected", datetime.now(), {}))
 
-            rx = (
-                client.services.get_service(p.UART_SERVICE)
-                .get_characteristic(p.UART_RX)
-            )
+            uart = client.services.get_service(p.UART_SERVICE)
+            if not uart:
+                raise RuntimeError("UART service not found")
+            rx = uart.get_characteristic(p.UART_RX)
 
             def on_v1(_c, data: bytearray) -> None:
                 event_bus.put_nowait(Event("raw_v1", datetime.now(), bytes(data)))
