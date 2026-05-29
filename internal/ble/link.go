@@ -55,7 +55,7 @@ func (c *Client) Connect(ctx context.Context, addr string, gen uint64) (*Link, e
 		ConnectionTimeout: bluetooth.NewDuration(connTimeout),
 	})
 	if err != nil {
-		c.logger.Error("connect failed", "addr", addr, "err", err)
+		c.logger.Debug("connect failed", "addr", addr, "err", err)
 		return nil, fmt.Errorf("connect %s: %w", addr, err)
 	}
 

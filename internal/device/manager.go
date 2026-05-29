@@ -15,10 +15,15 @@ import (
 )
 
 const (
-	reconnectInterval = 5 * time.Second
-	scanTimeout       = 15 * time.Second
-	cmdTimeout        = 5 * time.Second
-	heartbeatInterval = 60 * time.Second
+	reconnectInitialInterval = 5 * time.Second
+	reconnectMaxInterval     = 60 * time.Second
+	scanTimeout              = 15 * time.Second
+	cmdTimeout               = 5 * time.Second
+	heartbeatInterval        = 60 * time.Second
+
+	// If scan gating keeps missing the paired watch, occasionally try a direct
+	// connect anyway. Some devices/BlueZ states do not expose useful adverts.
+	directConnectAfterScanMisses = 5
 )
 
 // errConfigChanged is returned by doScan when a wake signal is received
@@ -196,6 +201,11 @@ func translateResults(in []ble.ScanResult) []ScanResult {
 // runPaired manages the connect/reconnect cycle for a paired device.
 // It returns when the device is unpaired or the context is cancelled.
 func (m *Manager) runPaired(ctx context.Context) error {
+	backoff := reconnectInitialInterval
+	failures := 0
+	requireAdvertisement := false
+	scanMisses := 0
+
 	for {
 		// Check context before each reconnect attempt.
 		select {
@@ -209,6 +219,32 @@ func (m *Manager) runPaired(ctx context.Context) error {
 			return nil // unpaired, exit to idle
 		}
 
+		if requireAdvertisement {
+			found, err := m.waitForPairedAdvertisement(ctx, cfg.PairedAddr)
+			if err != nil {
+				if errors.Is(err, errConfigChanged) {
+					continue
+				}
+				return err
+			}
+			if !found {
+				scanMisses++
+				if scanMisses < directConnectAfterScanMisses {
+					m.logger.Info("paired watch not seen; delaying reconnect", "addr", cfg.PairedAddr, "retry_in", backoff)
+					m.publish(Snapshot{State: StateDisconnected, PairedAddr: cfg.PairedAddr, PairedName: cfg.PairedName})
+					if err := m.waitBeforeReconnect(ctx, backoff); err != nil {
+						return err
+					}
+					backoff = nextReconnectDelay(backoff)
+					continue
+				}
+				m.logger.Info("paired watch not seen; trying direct reconnect anyway", "addr", cfg.PairedAddr, "scan_misses", scanMisses)
+				scanMisses = 0
+			} else {
+				scanMisses = 0
+			}
+		}
+
 		m.publish(Snapshot{
 			State:      StateConnecting,
 			PairedAddr: cfg.PairedAddr,
@@ -220,34 +256,105 @@ func (m *Manager) runPaired(ctx context.Context) error {
 
 		link, err := m.client.Connect(ctx, cfg.PairedAddr, gen)
 		if err != nil {
-			m.logger.Error("connect failed", "err", err, "addr", cfg.PairedAddr)
+			failures++
+			if failures == 1 || failures%12 == 0 {
+				m.logger.Warn("connect failed; will retry", "err", err, "addr", cfg.PairedAddr, "retry_in", backoff, "failures", failures)
+			} else {
+				m.logger.Debug("connect failed; will retry", "err", err, "addr", cfg.PairedAddr, "retry_in", backoff, "failures", failures)
+			}
 			m.publish(Snapshot{
 				State:      StateDisconnected,
 				PairedAddr: cfg.PairedAddr,
 				PairedName: cfg.PairedName,
 			})
-			if err := m.waitBeforeReconnect(ctx); err != nil {
+			requireAdvertisement = true
+			if err := m.waitBeforeReconnect(ctx, backoff); err != nil {
 				return err
 			}
+			backoff = nextReconnectDelay(backoff)
 			continue
 		}
 
+		failures = 0
+		backoff = reconnectInitialInterval
+		requireAdvertisement = false
 		m.logger.Info("session connected", "addr", cfg.PairedAddr, "v1_notif", link.V1NotifEnabled(), "v2_notif", link.V2NotifEnabled())
 
 		err = m.runSession(ctx, link, cfg)
 		link.Close()
 
-		if err != nil && !errors.Is(err, context.Canceled) {
-			m.logger.Warn("session ended", "err", err)
+		if errors.Is(err, context.Canceled) {
+			return err
 		}
+		if err == nil {
+			continue // likely config changed; loop will re-read config immediately
+		}
+
+		m.logger.Info("session ended; will reconnect", "err", err, "addr", cfg.PairedAddr, "retry_in", backoff)
+		m.publish(Snapshot{State: StateDisconnected, PairedAddr: cfg.PairedAddr, PairedName: cfg.PairedName})
+		requireAdvertisement = true
+		if err := m.waitBeforeReconnect(ctx, backoff); err != nil {
+			return err
+		}
+		backoff = nextReconnectDelay(backoff)
+	}
+}
+
+func nextReconnectDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return reconnectInitialInterval
+	}
+	next := current * 2
+	if next > reconnectMaxInterval {
+		return reconnectMaxInterval
+	}
+	return next
+}
+
+func (m *Manager) waitForPairedAdvertisement(ctx context.Context, addr string) (bool, error) {
+	scanCtx, scanCancel := context.WithTimeout(ctx, scanTimeout)
+	defer scanCancel()
+
+	type scanResult struct {
+		results []ble.ScanResult
+		err     error
+	}
+	ch := make(chan scanResult, 1)
+	go func() {
+		results, err := m.client.Scan(scanCtx)
+		ch <- scanResult{results: results, err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			m.logger.Debug("paired watch advertisement scan failed", "addr", addr, "err", r.err)
+		}
+		for _, result := range r.results {
+			if result.Address == addr {
+				m.logger.Info("paired watch advertisement seen", "addr", addr, "rssi", result.RSSI)
+				return true, nil
+			}
+		}
+		return false, nil
+
+	case <-m.wake:
+		scanCancel()
+		<-ch
+		return false, errConfigChanged
+
+	case <-ctx.Done():
+		scanCancel()
+		<-ch
+		return false, ctx.Err()
 	}
 }
 
 // waitBeforeReconnect waits for the reconnect interval, but remains
 // responsive to context cancellation and config changes (wake).
 // Operational requests are answered with errors.
-func (m *Manager) waitBeforeReconnect(ctx context.Context) error {
-	timer := time.NewTimer(reconnectInterval)
+func (m *Manager) waitBeforeReconnect(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
 	for {

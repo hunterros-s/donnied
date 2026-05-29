@@ -86,7 +86,7 @@ func (m *Manager) logNotification(ntype protocol.Notify, extra any, packet []byt
 			return
 		}
 	}
-	m.logger.Warn("unparsed device notification", "type", fmt.Sprintf("0x%02X", byte(ntype)), "packet", fmt.Sprintf("% X", packet))
+	m.logger.Debug("unparsed device notification", "type", fmt.Sprintf("0x%02X", byte(ntype)), "packet", fmt.Sprintf("% X", packet))
 }
 
 func applyNotification(data *DeviceData, ntype protocol.Notify, extra any) {
