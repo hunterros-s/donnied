@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -38,8 +39,12 @@ func doSleepHistory(client *http.Client) {
 	}
 }
 
-func doSleepSync(client *http.Client) {
-	result := postAction(client, "sleep-sync", nil)
+func doSync(client *http.Client) {
+	var body []byte
+	if len(os.Args) > 2 {
+		body, _ = json.Marshal(api.SyncRequest{Kinds: os.Args[2:]})
+	}
+	result := postAction(client, "sync", body)
 	printActionMessage(result)
 }
 

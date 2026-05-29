@@ -35,10 +35,10 @@ func ConfigPath(appName string) (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
-func SleepDBPath(appName string) (string, error) {
+func DBPath(appName string) (string, error) {
 	dir, err := DataDir(appName)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "sleep.db"), nil
+	return filepath.Join(dir, "donnied.db"), nil
 }

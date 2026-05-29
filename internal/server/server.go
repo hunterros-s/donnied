@@ -30,7 +30,7 @@ type Service interface {
 	DeviceRealtimeRead(ctx context.Context, rt protocol.RtType) (*protocol.RtReading, error)
 	DeviceRealtimeStart(ctx context.Context, rt protocol.RtType) error
 	DeviceRealtimeStop(ctx context.Context, rt protocol.RtType) error
-	SleepSync(ctx context.Context) error
+	Sync(ctx context.Context, kinds []string) error
 }
 
 type Server struct {
@@ -52,7 +52,7 @@ func New(svc Service, logger *slog.Logger) *Server {
 	mux.HandleFunc("POST /api/actions/unpair", s.handleUnpair)
 	mux.HandleFunc("POST /api/actions/sync-time", s.handleSyncTime)
 	mux.HandleFunc("POST /api/actions/find-device", s.handleFindDevice)
-	mux.HandleFunc("POST /api/actions/sleep-sync", s.handleSleepSync)
+	mux.HandleFunc("POST /api/actions/sync", s.handleSync)
 	mux.HandleFunc("POST /api/actions/realtime-read", s.handleRealtimeRead)
 	mux.HandleFunc("POST /api/actions/realtime-start", s.handleRealtimeStart)
 	mux.HandleFunc("POST /api/actions/realtime-stop", s.handleRealtimeStop)
@@ -157,7 +157,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	state, err := s.service.State(r.Context(), api.StateOptions{})
+	state, err := s.service.State(r.Context(), api.StateOptions{IncludeHistory: true})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -205,12 +205,16 @@ func (s *Server) handleFindDevice(w http.ResponseWriter, r *http.Request) {
 	s.writeActionState(w, r, http.StatusAccepted, "finding device")
 }
 
-func (s *Server) handleSleepSync(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.SleepSync(r.Context()); err != nil {
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	var req api.SyncRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.service.Sync(r.Context(), req.Kinds); err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	s.writeActionState(w, r, http.StatusAccepted, "sleep synced")
+	s.writeActionState(w, r, http.StatusAccepted, "synced")
 }
 
 func (s *Server) handleRealtimeRead(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +227,7 @@ func (s *Server) handleRealtimeRead(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	state, err := s.service.State(r.Context(), api.StateOptions{})
+	state, err := s.service.State(r.Context(), api.StateOptions{IncludeHistory: true})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -256,7 +260,7 @@ func (s *Server) handleRealtimeStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeActionState(w http.ResponseWriter, r *http.Request, code int, message string) {
-	state, err := s.service.State(r.Context(), api.StateOptions{})
+	state, err := s.service.State(r.Context(), api.StateOptions{IncludeHistory: true})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -290,11 +294,15 @@ func parseStateOptions(r *http.Request) (api.StateOptions, error) {
 		return api.StateOptions{}, fmt.Errorf("invalid to: %w", err)
 	}
 	includeWatch, watchKinds := parseWatchHistory(q.Get("watch_history"))
+	includeHistory := true
+	if v := q.Get("history"); v != "" {
+		includeHistory = boolQuery(v)
+	}
 	return api.StateOptions{
 		Day:                 day,
 		From:                from,
 		To:                  to,
-		IncludeHistory:      boolQuery(q.Get("history")) || includeWatch,
+		IncludeHistory:      includeHistory || includeWatch,
 		IncludeWatchHistory: includeWatch,
 		WatchHistoryKinds:   watchKinds,
 	}, nil

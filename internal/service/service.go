@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"smartwatch/internal/api"
@@ -36,19 +37,28 @@ type SleepTracker interface {
 	SyncNow(ctx context.Context) error
 }
 
+type MetricHistory interface {
+	HRSamples(ctx context.Context, from, to time.Time) ([]protocol.HRSample, error)
+	StepDetails(ctx context.Context, from, to time.Time) ([]protocol.SportDetail, error)
+	SpO2Days(ctx context.Context, from, to time.Time) ([]protocol.SpO2Day, error)
+	SyncNow(ctx context.Context) error
+}
+
 type Service struct {
 	startTime time.Time
 	shutdown  func()
 	device    Device
 	sleep     SleepTracker
+	metrics   MetricHistory
 }
 
-func New(device Device, sleepTracker SleepTracker, shutdown func()) *Service {
+func New(device Device, sleepTracker SleepTracker, metricHistory MetricHistory, shutdown func()) *Service {
 	return &Service{
 		startTime: time.Now(),
 		shutdown:  shutdown,
 		device:    device,
 		sleep:     sleepTracker,
+		metrics:   metricHistory,
 	}
 }
 
@@ -121,11 +131,40 @@ func (s *Service) DeviceRealtimeStop(ctx context.Context, rt protocol.RtType) er
 	return s.device.StopRealtime(ctx, rt)
 }
 
-func (s *Service) SleepSync(ctx context.Context) error {
-	if s.sleep == nil {
-		return errors.New("sleep tracker not available")
+func (s *Service) Sync(ctx context.Context, kinds []string) error {
+	if len(kinds) == 0 {
+		kinds = []string{"all"}
 	}
-	return s.sleep.SyncNow(ctx)
+
+	var syncSleep, syncMetrics bool
+	for _, kind := range kinds {
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "", "all":
+			syncSleep = true
+			syncMetrics = true
+		case "sleep":
+			syncSleep = true
+		case "metrics", "metric", "history", "hr", "steps", "spo2":
+			syncMetrics = true
+		}
+	}
+
+	var errs []error
+	if syncSleep {
+		if s.sleep == nil {
+			errs = append(errs, errors.New("sleep tracker not available"))
+		} else if err := s.sleep.SyncNow(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if syncMetrics {
+		if s.metrics == nil {
+			errs = append(errs, errors.New("metric history tracker not available"))
+		} else if err := s.metrics.SyncNow(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Service) deviceState() api.DeviceState {
@@ -172,11 +211,21 @@ func (s *Service) sleepState(ctx context.Context) api.SleepState {
 	}
 }
 
+const defaultHistoryDays = 7
+
 func (s *Service) populateHistory(ctx context.Context, h *api.HistoryState, selectedDay time.Time, opts api.StateOptions) {
 	from, to := opts.From, opts.To
 	if from.IsZero() && to.IsZero() {
-		from = selectedDay
+		from = selectedDay.AddDate(0, 0, -(defaultHistoryDays - 1))
 		to = selectedDay.AddDate(0, 0, 1)
+	}
+	if !from.IsZero() {
+		v := from
+		h.From = &v
+	}
+	if !to.IsZero() {
+		v := to
+		h.To = &v
 	}
 
 	if s.sleep == nil {
@@ -185,6 +234,26 @@ func (s *Service) populateHistory(ctx context.Context, h *api.HistoryState, sele
 		addHistoryError(h, "sleep_sessions", err.Error())
 	} else {
 		h.SleepSessions = sessions
+	}
+
+	if s.metrics == nil {
+		addHistoryError(h, "metrics", "metric history tracker not available")
+	} else {
+		if samples, err := s.metrics.HRSamples(ctx, from, to); err != nil {
+			addHistoryError(h, "hr_samples", err.Error())
+		} else {
+			h.HRSamples = samples
+		}
+		if details, err := s.metrics.StepDetails(ctx, from, to); err != nil {
+			addHistoryError(h, "step_details", err.Error())
+		} else {
+			h.StepDetails = details
+		}
+		if days, err := s.metrics.SpO2Days(ctx, from, to); err != nil {
+			addHistoryError(h, "spo2_days", err.Error())
+		} else {
+			h.SpO2Days = days
+		}
 	}
 
 	if !opts.IncludeWatchHistory {

@@ -50,6 +50,8 @@ type SleepState struct {
 
 type HistoryState struct {
 	SelectedDay   string            `json:"selected_day"`
+	From          *time.Time        `json:"from,omitempty"`
+	To            *time.Time        `json:"to,omitempty"`
 	SleepSessions []SleepSession    `json:"sleep_sessions,omitempty"`
 	DeviceSleep   []DeviceSleep     `json:"device_sleep,omitempty"`
 	HRSamples     []HRSample        `json:"hr_samples,omitempty"`
@@ -84,6 +86,10 @@ type PairRequest struct {
 
 type RealtimeRequest struct {
 	Type int `json:"type"`
+}
+
+type SyncRequest struct {
+	Kinds []string `json:"kinds"`
 }
 
 // Shared domain/protocol DTOs used directly in canonical API responses.

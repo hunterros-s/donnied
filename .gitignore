@@ -1,0 +1,7 @@
+# Local SQLite data/scratch files. Runtime databases live outside the repo, but
+# ignore these defensively in case a path is overridden during development.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3

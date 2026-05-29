@@ -14,6 +14,7 @@ import (
 	"smartwatch/internal/app"
 	"smartwatch/internal/config"
 	"smartwatch/internal/device"
+	"smartwatch/internal/history"
 	"smartwatch/internal/paths"
 	"smartwatch/internal/server"
 	"smartwatch/internal/service"
@@ -61,27 +62,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	sleepDBPath, err := paths.SleepDBPath("donnied")
+	dbPath, err := paths.DBPath("donnied")
 	if err != nil {
-		logger.Error("sleep db path failed", "err", err)
+		logger.Error("db path failed", "err", err)
 		os.Exit(1)
 	}
-	sleepStore, err := sleep.NewStore(sleepDBPath)
+	sleepStore, err := sleep.NewStore(dbPath)
 	if err != nil {
-		logger.Error("sleep store init failed", "err", err, "path", sleepDBPath)
+		logger.Error("sleep store init failed", "err", err, "path", dbPath)
 		os.Exit(1)
 	}
 	defer sleepStore.Close()
 
+	historyStore, err := history.NewStore(dbPath)
+	if err != nil {
+		logger.Error("history store init failed", "err", err, "path", dbPath)
+		os.Exit(1)
+	}
+	defer historyStore.Close()
+
 	deviceMgr := device.New(cfgStore, logger)
 	sleepDevice := app.NewSleepDevice(deviceMgr)
 	sleepTracker := sleep.NewTracker(sleepDevice, sleepStore, logger)
-	svc := service.New(deviceMgr, sleepTracker, cancel)
+	historyTracker := history.NewTracker(deviceMgr, historyStore, logger)
+	svc := service.New(deviceMgr, sleepTracker, historyTracker, cancel)
 	srv := server.New(svc, logger)
 
-	logger.Info("daemon started", "pid", os.Getpid(), "data_dir", dirOf(sleepDBPath), "config", cfgPath, "sleep_db", sleepDBPath)
+	logger.Info("daemon started", "pid", os.Getpid(), "data_dir", dirOf(dbPath), "config", cfgPath, "db", dbPath)
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 	go func() {
 		errCh <- srv.Run(ctx)
 	}()
@@ -90,6 +99,9 @@ func main() {
 	}()
 	go func() {
 		errCh <- sleepTracker.Run(ctx)
+	}()
+	go func() {
+		errCh <- historyTracker.Run(ctx)
 	}()
 	go func() {
 		errCh <- app.RunDeviceEvents(ctx, deviceMgr.Events(), sleepTracker, logger)

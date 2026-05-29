@@ -16,7 +16,7 @@ func doHRLog(client *http.Client) {
 	if len(os.Args) > 2 {
 		day = os.Args[2]
 	}
-	state := fetchState(client, historyQuery(day, "hr"))
+	state := fetchState(client, historyQuery(day))
 	samples := state.History.HRSamples
 	if len(samples) == 0 {
 		printHistoryErrors(state, "hr_samples")
@@ -31,7 +31,7 @@ func doHRLog(client *http.Client) {
 
 func doSteps(client *http.Client) {
 	day := dayArgFromOffset()
-	state := fetchState(client, historyQuery(day, "steps"))
+	state := fetchState(client, historyQuery(day))
 	details := state.History.StepDetails
 	if len(details) == 0 {
 		printHistoryErrors(state, "step_details")
@@ -45,7 +45,7 @@ func doSteps(client *http.Client) {
 }
 
 func doSleep(client *http.Client) {
-	state := fetchState(client, historyQuery("today", "device_sleep"))
+	state := fetchState(client, watchHistoryQuery("today", "device_sleep"))
 	sessions := state.History.DeviceSleep
 	if len(sessions) == 0 {
 		printHistoryErrors(state, "device_sleep")
@@ -63,7 +63,7 @@ func doSleep(client *http.Client) {
 
 func doSpO2(client *http.Client) {
 	day := dayArgFromOffset()
-	state := fetchState(client, historyQuery(day, "spo2"))
+	state := fetchState(client, historyQuery(day))
 	days := state.History.SpO2Days
 	if len(days) == 0 {
 		printHistoryErrors(state, "spo2_days")
@@ -78,7 +78,14 @@ func doSpO2(client *http.Client) {
 	}
 }
 
-func historyQuery(day, watchKind string) string {
+func historyQuery(day string) string {
+	q := url.Values{}
+	q.Set("history", "true")
+	q.Set("day", day)
+	return q.Encode()
+}
+
+func watchHistoryQuery(day, watchKind string) string {
 	q := url.Values{}
 	q.Set("history", "true")
 	q.Set("watch_history", watchKind)

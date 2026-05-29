@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const usage = "usage: ddctl <health|info|shutdown|scan|pair|unpair|status|connected|battery|time|find|hr-log|steps|sleep|sleep-status|sleep-history|sleep-sync|spo2|realtime|realtime-start|realtime-stop>"
+const usage = "usage: ddctl <health|info|shutdown|scan|pair|unpair|status|connected|battery|time|find|hr-log|steps|sleep|sleep-status|sleep-history|sync|spo2|realtime|realtime-start|realtime-stop>"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -51,8 +51,8 @@ func dispatch(command string, client *http.Client) {
 		doSleepStatus(client)
 	case "sleep-history":
 		doSleepHistory(client)
-	case "sleep-sync":
-		doSleepSync(client)
+	case "sync":
+		doSync(client)
 	case "spo2":
 		doSpO2(client)
 	case "realtime":
