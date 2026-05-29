@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"smartwatch/internal/device"
+	"smartwatch/internal/sleep"
 	"smartwatch/protocol"
 )
 
@@ -21,6 +22,9 @@ type BatteryInfo struct {
 	Level    int  `json:"level"`
 	Charging bool `json:"charging"`
 }
+
+type SleepStatus = sleep.Status
+type SleepSession = sleep.Session
 
 // ScanResult mirrors device.ScanResult for clean server boundaries.
 type ScanResult struct {
@@ -61,17 +65,25 @@ type Device interface {
 	StopRealtime(ctx context.Context, rt protocol.RtType) error
 }
 
+type SleepTracker interface {
+	Status(ctx context.Context) (*sleep.Status, error)
+	Sessions(ctx context.Context, from, to time.Time) ([]sleep.Session, error)
+	SyncNow(ctx context.Context) error
+}
+
 type Service struct {
 	startTime time.Time
 	shutdown  func()
 	device    Device
+	sleep     SleepTracker
 }
 
-func New(device Device, shutdown func()) *Service {
+func New(device Device, sleepTracker SleepTracker, shutdown func()) *Service {
 	return &Service{
 		startTime: time.Now(),
 		shutdown:  shutdown,
 		device:    device,
+		sleep:     sleepTracker,
 	}
 }
 
@@ -181,4 +193,25 @@ func (s *Service) DeviceRealtimeStart(ctx context.Context, rt protocol.RtType) e
 
 func (s *Service) DeviceRealtimeStop(ctx context.Context, rt protocol.RtType) error {
 	return s.device.StopRealtime(ctx, rt)
+}
+
+func (s *Service) SleepStatus(ctx context.Context) (*sleep.Status, error) {
+	if s.sleep == nil {
+		return nil, errors.New("sleep tracker not available")
+	}
+	return s.sleep.Status(ctx)
+}
+
+func (s *Service) SleepSessions(ctx context.Context, from, to time.Time) ([]sleep.Session, error) {
+	if s.sleep == nil {
+		return nil, errors.New("sleep tracker not available")
+	}
+	return s.sleep.Sessions(ctx, from, to)
+}
+
+func (s *Service) SleepSync(ctx context.Context) error {
+	if s.sleep == nil {
+		return errors.New("sleep tracker not available")
+	}
+	return s.sleep.SyncNow(ctx)
 }

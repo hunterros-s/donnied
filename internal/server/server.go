@@ -22,6 +22,8 @@ type (
 	BatteryInfo  = service.BatteryInfo
 	ScanResult   = service.ScanResult
 	DeviceStatus = service.DeviceStatus
+	SleepStatus  = service.SleepStatus
+	SleepSession = service.SleepSession
 )
 
 type Service interface {
@@ -43,6 +45,9 @@ type Service interface {
 	DeviceRealtimeRead(ctx context.Context, rt protocol.RtType) (*protocol.RtReading, error)
 	DeviceRealtimeStart(ctx context.Context, rt protocol.RtType) error
 	DeviceRealtimeStop(ctx context.Context, rt protocol.RtType) error
+	SleepStatus(ctx context.Context) (*SleepStatus, error)
+	SleepSessions(ctx context.Context, from, to time.Time) ([]SleepSession, error)
+	SleepSync(ctx context.Context) error
 }
 
 type Server struct {
@@ -77,6 +82,10 @@ func New(svc Service, logger *slog.Logger) *Server {
 	mux.HandleFunc("POST /device/realtime/read", s.handleRealtimeRead)
 	mux.HandleFunc("POST /device/realtime/start", s.handleRealtimeStart)
 	mux.HandleFunc("POST /device/realtime/stop", s.handleRealtimeStop)
+
+	mux.HandleFunc("GET /sleep/status", s.handleSleepStatus)
+	mux.HandleFunc("GET /sleep/sessions", s.handleSleepSessions)
+	mux.HandleFunc("POST /sleep/sync", s.handleSleepSync)
 
 	// Keep the TCP listener loopback-only. ddctl uses the Unix socket; the TCP
 	// listener is for local development/debugging and should not expose device
@@ -357,6 +366,45 @@ func (s *Server) handleRealtimeStop(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("stopped\n"))
 }
 
+func (s *Server) handleSleepStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.service.SleepStatus(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handleSleepSessions(w http.ResponseWriter, r *http.Request) {
+	from, err := parseOptionalTime(r.URL.Query().Get("from"))
+	if err != nil {
+		http.Error(w, "invalid from: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	to, err := parseOptionalTime(r.URL.Query().Get("to"))
+	if err != nil {
+		http.Error(w, "invalid to: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	sessions, err := s.service.SleepSessions(r.Context(), from, to)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessions)
+}
+
+func (s *Server) handleSleepSync(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.SleepSync(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte("sleep synced\n"))
+}
+
 func decodeRealtimeType(w http.ResponseWriter, r *http.Request) (protocol.RtType, bool) {
 	var req struct {
 		Type int `json:"type"`
@@ -380,4 +428,17 @@ func parseDay(s string) (protocol.Day, error) {
 		return protocol.Day{}, fmt.Errorf("invalid day format (use YYYY-MM-DD or \"today\"): %w", err)
 	}
 	return protocol.Day{Year: t.Year(), Month: t.Month(), Day: t.Day()}, nil
+}
+
+func parseOptionalTime(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("use RFC3339 timestamp or YYYY-MM-DD")
 }

@@ -71,3 +71,36 @@ type sleepStage struct {
 	Stage   int `json:"stage"`
 	Minutes int `json:"minutes"`
 }
+
+type normalizedSleepStatus struct {
+	State    string     `json:"state"`
+	Stage    string     `json:"stage"`
+	StageRaw int        `json:"stage_raw"`
+	Since    *time.Time `json:"since"`
+	LastSync *time.Time `json:"last_sync"`
+	Source   string     `json:"source"`
+	Stale    bool       `json:"stale"`
+}
+
+type normalizedSleepSession struct {
+	ID           string                   `json:"id"`
+	DeviceAddr   string                   `json:"device_addr"`
+	Start        time.Time                `json:"start"`
+	End          time.Time                `json:"end"`
+	TotalMinutes int                      `json:"total_minutes"`
+	Source       string                   `json:"source"`
+	FirstSeen    time.Time                `json:"first_seen"`
+	LastSeen     time.Time                `json:"last_seen"`
+	Segments     []normalizedSleepSegment `json:"segments"`
+}
+
+type normalizedSleepSegment struct {
+	Index    int       `json:"index"`
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"`
+	Minutes  int       `json:"minutes"`
+	StageRaw int       `json:"stage_raw"`
+	Stage    string    `json:"stage"`
+	State    string    `json:"state"`
+	Source   string    `json:"source"`
+}

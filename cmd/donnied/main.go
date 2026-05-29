@@ -6,14 +6,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"smartwatch/internal/app"
 	"smartwatch/internal/config"
 	"smartwatch/internal/device"
+	"smartwatch/internal/paths"
 	"smartwatch/internal/server"
 	"smartwatch/internal/service"
+	"smartwatch/internal/sleep"
 )
 
 func main() {
@@ -46,24 +50,49 @@ func main() {
 		}
 	}()
 
-	cfgStore, err := config.New("donnied")
+	cfgPath, err := paths.ConfigPath("donnied")
 	if err != nil {
-		logger.Error("config init failed", "err", err)
+		logger.Error("config path failed", "err", err)
+		os.Exit(1)
+	}
+	cfgStore, err := config.NewAt(cfgPath)
+	if err != nil {
+		logger.Error("config init failed", "err", err, "path", cfgPath)
 		os.Exit(1)
 	}
 
+	sleepDBPath, err := paths.SleepDBPath("donnied")
+	if err != nil {
+		logger.Error("sleep db path failed", "err", err)
+		os.Exit(1)
+	}
+	sleepStore, err := sleep.NewStore(sleepDBPath)
+	if err != nil {
+		logger.Error("sleep store init failed", "err", err, "path", sleepDBPath)
+		os.Exit(1)
+	}
+	defer sleepStore.Close()
+
 	deviceMgr := device.New(cfgStore, logger)
-	svc := service.New(deviceMgr, cancel)
+	sleepDevice := app.NewSleepDevice(deviceMgr)
+	sleepTracker := sleep.NewTracker(sleepDevice, sleepStore, logger)
+	svc := service.New(deviceMgr, sleepTracker, cancel)
 	srv := server.New(svc, logger)
 
-	logger.Info("daemon started", "pid", os.Getpid())
+	logger.Info("daemon started", "pid", os.Getpid(), "data_dir", dirOf(sleepDBPath), "config", cfgPath, "sleep_db", sleepDBPath)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 4)
 	go func() {
 		errCh <- srv.Run(ctx)
 	}()
 	go func() {
 		errCh <- deviceMgr.Run(ctx)
+	}()
+	go func() {
+		errCh <- sleepTracker.Run(ctx)
+	}()
+	go func() {
+		errCh <- app.RunDeviceEvents(ctx, deviceMgr.Events(), sleepTracker, logger)
 	}()
 
 	firstErr := <-errCh
@@ -87,4 +116,8 @@ func main() {
 	}
 
 	logger.Info("daemon stopped gracefully")
+}
+
+func dirOf(path string) string {
+	return filepath.Dir(path)
 }

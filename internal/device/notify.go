@@ -1,6 +1,7 @@
 package device
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
@@ -118,12 +119,19 @@ func applyNotification(data *DeviceData, ntype protocol.Notify, extra any) {
 
 // handleV2 processes a complete V2 (Big Data) frame and updates device data.
 // Called only from the owner loop for unsolicited frames.
-func (m *Manager) handleV2(data *DeviceData, frame []byte) {
-	data.LastSeen = time.Now()
+func (m *Manager) handleV2(data *DeviceData, frame []byte, deviceAddr string) {
+	receivedAt := time.Now()
+	data.LastSeen = receivedAt
 
 	if len(frame) < 2 {
 		return
 	}
 	cmd := protocol.V2Cmd(frame[1])
 	m.logger.Info("v2 frame (unsolicited)", "cmd", fmt.Sprintf("0x%02X", byte(cmd)), "len", len(frame))
+
+	select {
+	case m.events <- Event{Type: EventV2Frame, DeviceAddr: deviceAddr, ReceivedAt: receivedAt, V2Cmd: cmd, Data: bytes.Clone(frame)}:
+	default:
+		m.logger.Warn("dropping device event; queue full", "type", EventV2Frame, "cmd", fmt.Sprintf("0x%02X", byte(cmd)))
+	}
 }

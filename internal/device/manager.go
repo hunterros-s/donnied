@@ -45,6 +45,9 @@ type Manager struct {
 	// Multi-packet parsers (reused across requests within a session).
 	hrLogParser *protocol.HRLogParser
 	stepsParser *protocol.StepsParser
+
+	// Unsolicited raw device events for higher layers.
+	events chan Event
 }
 
 // New creates a Manager. It does not start BLE operations until Run is called.
@@ -57,6 +60,7 @@ func New(cfg *config.Store, logger *slog.Logger) *Manager {
 		reqs:        make(chan request, 8),
 		hrLogParser: protocol.NewHRLogParser(),
 		stepsParser: protocol.NewStepsParser(),
+		events:      make(chan Event, 32),
 	}
 	m.publish(Snapshot{State: StateIdle})
 	return m
@@ -433,7 +437,7 @@ func (m *Manager) runSession(ctx context.Context, link sessionLink, cfg config.C
 							current = nil
 						}
 					} else {
-						m.handleV2(&data, frame)
+						m.handleV2(&data, frame, cfg.PairedAddr)
 					}
 				}
 			}
@@ -558,6 +562,12 @@ func (m *Manager) Battery() *protocol.BatteryInfo {
 	}
 	cp := *snap.Data.Battery
 	return &cp
+}
+
+// Events returns unsolicited raw device events. Consumers should keep reading;
+// events are dropped if the channel buffer fills.
+func (m *Manager) Events() <-chan Event {
+	return m.events
 }
 
 // PairedDevice returns the persisted pair information.

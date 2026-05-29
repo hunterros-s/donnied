@@ -27,8 +27,11 @@ func New(appName string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, appName, "config.json")
+	return NewAt(filepath.Join(dir, appName, "config.json"))
+}
 
+// NewAt loads (or creates) a Store at the exact file path.
+func NewAt(path string) (*Store, error) {
 	s := &Store{path: path}
 	if err := s.load(); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("load config: %w", err)

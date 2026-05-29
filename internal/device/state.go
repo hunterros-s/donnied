@@ -42,15 +42,33 @@ type ScanResult struct {
 	HasUART bool   `json:"has_uart"`
 }
 
+// EventType identifies unsolicited device events surfaced above the BLE layer.
+type EventType string
+
+const (
+	EventV2Frame EventType = "v2_frame"
+)
+
+// Event is a generic unsolicited device event. The device package only exposes
+// transport/protocol facts; higher layers decide whether a V2 frame is sleep,
+// SpO2, or something else worth persisting.
+type Event struct {
+	Type       EventType
+	DeviceAddr string
+	ReceivedAt time.Time
+	V2Cmd      protocol.V2Cmd
+	Data       []byte
+}
+
 // DeviceData holds the latest cached telemetry from the watch.
 type DeviceData struct {
-	LastSeen    time.Time
-	Battery     *protocol.BatteryInfo
-	HeartRate   int
-	SpO2        int
-	Steps       int
-	Calories    float64
-	Distance    int
+	LastSeen     time.Time
+	Battery      *protocol.BatteryInfo
+	HeartRate    int
+	SpO2         int
+	Steps        int
+	Calories     float64
+	Distance     int
 	LiveActivity *protocol.LiveActivity
 }
 
