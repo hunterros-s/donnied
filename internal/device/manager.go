@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -144,8 +145,26 @@ func (m *Manager) runIdle(ctx context.Context) error {
 
 func (m *Manager) doScan(ctx context.Context) ([]ScanResult, error) {
 	m.logger.Info("scan requested")
-	m.publish(Snapshot{State: StateScanning})
-	defer m.publish(Snapshot{State: StateIdle})
+	prev := m.Snapshot()
+	m.publish(Snapshot{
+		State:      StateScanning,
+		PairedAddr: prev.PairedAddr,
+		PairedName: prev.PairedName,
+	})
+	defer func() {
+		// Restore the durable pairing view after scans. Scans can now be used
+		// while paired-but-disconnected to repair a stale OS/CoreBluetooth
+		// peripheral address, so publishing idle unconditionally would make the
+		// app briefly look unpaired.
+		if m.config != nil {
+			cfg := m.config.Load()
+			if cfg.PairedAddr != "" {
+				m.publish(Snapshot{State: StateDisconnected, PairedAddr: cfg.PairedAddr, PairedName: cfg.PairedName})
+				return
+			}
+		}
+		m.publish(Snapshot{State: StateIdle})
+	}()
 
 	scanCtx, scanCancel := context.WithTimeout(ctx, scanTimeout)
 	defer scanCancel()
@@ -219,15 +238,26 @@ func (m *Manager) runPaired(ctx context.Context) error {
 			return nil // unpaired, exit to idle
 		}
 
+		var repairExpected config.Config
+		pendingRepair := false
+
 		if requireAdvertisement {
-			found, err := m.waitForPairedAdvertisement(ctx, cfg.PairedAddr)
+			adv, err := m.waitForPairedAdvertisement(ctx, cfg)
 			if err != nil {
 				if errors.Is(err, errConfigChanged) {
 					continue
 				}
 				return err
 			}
-			if !found {
+			if adv.repaired {
+				// Try the newly-advertised address, but only persist it after a
+				// successful connection so a false/failed name match does not make the
+				// stored pairing worse.
+				repairExpected = cfg
+				cfg = config.Config{PairedAddr: adv.address, PairedName: adv.name}
+				pendingRepair = true
+			}
+			if !adv.found {
 				scanMisses++
 				if scanMisses < directConnectAfterScanMisses {
 					m.logger.Info("paired watch not seen; delaying reconnect", "addr", cfg.PairedAddr, "retry_in", backoff)
@@ -262,10 +292,14 @@ func (m *Manager) runPaired(ctx context.Context) error {
 			} else {
 				m.logger.Debug("connect failed; will retry", "err", err, "addr", cfg.PairedAddr, "retry_in", backoff, "failures", failures)
 			}
+			publishCfg := cfg
+			if pendingRepair {
+				publishCfg = repairExpected
+			}
 			m.publish(Snapshot{
 				State:      StateDisconnected,
-				PairedAddr: cfg.PairedAddr,
-				PairedName: cfg.PairedName,
+				PairedAddr: publishCfg.PairedAddr,
+				PairedName: publishCfg.PairedName,
 			})
 			requireAdvertisement = true
 			if err := m.waitBeforeReconnect(ctx, backoff); err != nil {
@@ -273,6 +307,19 @@ func (m *Manager) runPaired(ctx context.Context) error {
 			}
 			backoff = nextReconnectDelay(backoff)
 			continue
+		}
+
+		if pendingRepair {
+			repairedCfg, ok, err := m.repairPairedAddress(repairExpected, cfg.PairedAddr, cfg.PairedName)
+			if err != nil {
+				m.logger.Warn("failed to save repaired paired address", "old_addr", repairExpected.PairedAddr, "new_addr", cfg.PairedAddr, "err", err)
+			} else if !ok {
+				m.logger.Info("config changed while repaired address was connecting; restarting session")
+				link.Close()
+				continue
+			} else {
+				cfg = repairedCfg
+			}
 		}
 
 		failures = 0
@@ -311,7 +358,14 @@ func nextReconnectDelay(current time.Duration) time.Duration {
 	return next
 }
 
-func (m *Manager) waitForPairedAdvertisement(ctx context.Context, addr string) (bool, error) {
+type pairedAdvertisement struct {
+	found    bool
+	address  string
+	name     string
+	repaired bool
+}
+
+func (m *Manager) waitForPairedAdvertisement(ctx context.Context, cfg config.Config) (pairedAdvertisement, error) {
 	scanCtx, scanCancel := context.WithTimeout(ctx, scanTimeout)
 	defer scanCancel()
 
@@ -328,25 +382,76 @@ func (m *Manager) waitForPairedAdvertisement(ctx context.Context, addr string) (
 	select {
 	case r := <-ch:
 		if r.err != nil {
-			m.logger.Debug("paired watch advertisement scan failed", "addr", addr, "err", r.err)
+			m.logger.Debug("paired watch advertisement scan failed", "addr", cfg.PairedAddr, "err", r.err)
 		}
-		for _, result := range r.results {
-			if result.Address == addr {
-				m.logger.Info("paired watch advertisement seen", "addr", addr, "rssi", result.RSSI)
-				return true, nil
-			}
-		}
-		return false, nil
+		return m.matchPairedAdvertisement(cfg, r.results), nil
 
 	case <-m.wake:
 		scanCancel()
 		<-ch
-		return false, errConfigChanged
+		return pairedAdvertisement{}, errConfigChanged
 
 	case <-ctx.Done():
 		scanCancel()
 		<-ch
-		return false, ctx.Err()
+		return pairedAdvertisement{}, ctx.Err()
+	}
+}
+
+func (m *Manager) matchPairedAdvertisement(cfg config.Config, results []ble.ScanResult) pairedAdvertisement {
+	var nameMatches []ble.ScanResult
+	for _, result := range results {
+		if sameBLEAddress(result.Address, cfg.PairedAddr) {
+			m.logger.Info("paired watch advertisement seen", "addr", cfg.PairedAddr, "rssi", result.RSSI)
+			return pairedAdvertisement{found: true, address: result.Address, name: result.Name}
+		}
+		if pairedNameMatches(cfg.PairedName, result.Name) {
+			nameMatches = append(nameMatches, result)
+		}
+	}
+
+	if len(nameMatches) == 1 {
+		match := nameMatches[0]
+		m.logger.Warn("paired watch appears under a different BLE address; repairing app pairing", "old_addr", cfg.PairedAddr, "new_addr", match.Address, "name", match.Name)
+		return pairedAdvertisement{found: true, address: match.Address, name: match.Name, repaired: true}
+	}
+	if len(nameMatches) > 1 {
+		m.logger.Warn("paired watch name matched multiple advertisements; not repairing address", "addr", cfg.PairedAddr, "name", cfg.PairedName, "matches", len(nameMatches))
+	}
+	return pairedAdvertisement{}
+}
+
+func (m *Manager) repairPairedAddress(expected config.Config, addr, name string) (config.Config, bool, error) {
+	latest := m.config.Load()
+	if latest.PairedAddr != expected.PairedAddr || latest.PairedName != expected.PairedName {
+		return latest, false, nil
+	}
+	if normalizedPairName(name) == "" {
+		name = latest.PairedName
+	}
+	if err := m.config.Save(config.Config{PairedAddr: addr, PairedName: name}); err != nil {
+		return latest, false, err
+	}
+	return config.Config{PairedAddr: addr, PairedName: name}, true, nil
+}
+
+func sameBLEAddress(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+func pairedNameMatches(pairedName, advertisedName string) bool {
+	paired := normalizedPairName(pairedName)
+	advertised := normalizedPairName(advertisedName)
+	return paired != "" && paired == advertised
+}
+
+func normalizedPairName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	switch name {
+	case "", "(unnamed)", "unknown", "unnamed":
+		return ""
+	default:
+		return name
 	}
 }
 
@@ -375,10 +480,17 @@ func (m *Manager) waitBeforeReconnect(ctx context.Context, delay time.Duration) 
 				}
 
 			case scanReq:
+				// Allow scans while paired but disconnected. This lets the UI repair or
+				// switch devices after the OS BLE stack has forgotten/renumbered the
+				// peripheral, without requiring a separate unpair first.
+				results, err := m.doScan(ctx)
 				select {
-				case r.reply <- scanReply{err: errors.New("cannot scan while paired")}:
+				case r.reply <- scanReply{results: results, err: err}:
 				case <-ctx.Done():
 					return ctx.Err()
+				}
+				if errors.Is(err, errConfigChanged) {
+					return nil
 				}
 
 			default:
