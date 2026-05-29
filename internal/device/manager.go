@@ -661,16 +661,6 @@ func (m *Manager) IsConnected() bool {
 	return m.Snapshot().Connected
 }
 
-// Battery returns a copy of the last known battery info, or nil.
-func (m *Manager) Battery() *protocol.BatteryInfo {
-	snap := m.Snapshot()
-	if snap.Data.Battery == nil {
-		return nil
-	}
-	cp := *snap.Data.Battery
-	return &cp
-}
-
 // Events returns unsolicited raw device events. Consumers should keep reading;
 // events are dropped if the channel buffer fills.
 func (m *Manager) Events() <-chan Event {

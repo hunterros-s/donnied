@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"time"
+
+	"smartwatch/internal/api"
 )
 
-func printSleepSession(n int, s sleepSession) {
+func printSleepSession(n int, s api.DeviceSleep) {
 	start := s.Start.Local()
 	end := s.End.Local()
 	dur := end.Sub(start).Round(time.Minute)
@@ -19,7 +21,7 @@ func printSleepSession(n int, s sleepSession) {
 
 	totals := map[int]int{}
 	for _, st := range s.Stages {
-		totals[st.Stage] += st.Minutes
+		totals[int(st.Stage)] += st.Minutes
 	}
 	fmt.Printf("  totals: light %s, deep %s, REM %s, awake %s\n",
 		formatMinutes(totals[2]),
@@ -31,7 +33,7 @@ func printSleepSession(n int, s sleepSession) {
 	fmt.Println("  stages:")
 	cursor := start
 	for _, st := range s.Stages {
-		fmt.Printf("    %s  %-5s  %s\n", cursor.Format("15:04"), sleepStageName(st.Stage), formatMinutes(st.Minutes))
+		fmt.Printf("    %s  %-5s  %s\n", cursor.Format("15:04"), sleepStageName(int(st.Stage)), formatMinutes(st.Minutes))
 		cursor = cursor.Add(time.Duration(st.Minutes) * time.Minute)
 	}
 }
@@ -58,7 +60,7 @@ func formatMinutes(minutes int) string {
 	return fmt.Sprintf("%dh%02dm", minutes/60, minutes%60)
 }
 
-func printSpO2Day(day spO2Day) {
+func printSpO2Day(day api.SpO2Day) {
 	label := "today"
 	if day.DaysAgo == 1 {
 		label = "yesterday"

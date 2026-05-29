@@ -1,64 +1,32 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
+
+	"smartwatch/internal/api"
 )
 
 func doSleepStatus(client *http.Client) {
-	resp, err := client.Get("http://localhost/sleep/status")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(os.Stderr, resp.Body)
-		fmt.Fprintln(os.Stderr)
-		os.Exit(1)
-	}
-	var status normalizedSleepStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	printSleepStatus(status)
+	state := fetchState(client, "")
+	printSleepStatus(state.Sleep)
 }
 
 func doSleepHistory(client *http.Client) {
 	q := url.Values{}
+	q.Set("history", "true")
 	if len(os.Args) > 2 {
 		q.Set("from", os.Args[2])
 	}
 	if len(os.Args) > 3 {
 		q.Set("to", os.Args[3])
 	}
-	endpoint := "http://localhost/sleep/sessions"
-	if enc := q.Encode(); enc != "" {
-		endpoint += "?" + enc
-	}
-	resp, err := client.Get(endpoint)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(os.Stderr, resp.Body)
-		fmt.Fprintln(os.Stderr)
-		os.Exit(1)
-	}
-	var sessions []normalizedSleepSession
-	if err := json.NewDecoder(resp.Body).Decode(&sessions); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
+	state := fetchState(client, q.Encode())
+	sessions := state.History.SleepSessions
 	if len(sessions) == 0 {
+		printHistoryErrors(state, "sleep_sessions")
 		fmt.Println("No persisted sleep data.")
 		return
 	}
@@ -71,21 +39,11 @@ func doSleepHistory(client *http.Client) {
 }
 
 func doSleepSync(client *http.Client) {
-	resp, err := client.Post("http://localhost/sleep/sync", "text/plain", strings.NewReader(""))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Println()
-		os.Exit(1)
-	}
-	fmt.Println()
+	result := postAction(client, "sleep-sync", nil)
+	printActionMessage(result)
 }
 
-func printSleepStatus(status normalizedSleepStatus) {
+func printSleepStatus(status api.SleepState) {
 	fmt.Printf("state: %s\n", status.State)
 	if status.Stage != "" {
 		fmt.Printf("stage: %s\n", status.Stage)
@@ -97,15 +55,18 @@ func printSleepStatus(status normalizedSleepStatus) {
 		fmt.Printf("last sync: %s\n", status.LastSync.Local().Format("2006-01-02 15:04:05"))
 	}
 	fmt.Printf("stale: %v\n", status.Stale)
+	if status.Error != "" {
+		fmt.Printf("error: %s\n", status.Error)
+	}
 }
 
-func printNormalizedSleepSession(n int, s normalizedSleepSession) {
+func printNormalizedSleepSession(n int, s api.SleepSession) {
 	start := s.Start.Local()
 	end := s.End.Local()
 	fmt.Printf("Sleep session %d [%s]\n", n, s.Source)
 	fmt.Printf("  %s → %s  (%s)\n", start.Format("Mon 2006-01-02 15:04"), end.Format("Mon 15:04"), formatMinutes(s.TotalMinutes))
 	fmt.Println("  segments:")
 	for _, seg := range s.Segments {
-		fmt.Printf("    %s  %-7s  %-6s  %s\n", seg.Start.Local().Format("15:04"), seg.Stage, seg.State, formatMinutes(seg.Minutes))
+		fmt.Printf("    %s  %-7s  %-6s  %s\n", seg.Start.Local().Format("15:04"), seg.StageName, seg.State, formatMinutes(seg.Minutes))
 	}
 }

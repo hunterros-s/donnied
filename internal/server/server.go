@@ -5,48 +5,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
-	"smartwatch/internal/service"
+	"smartwatch/internal/api"
 	"smartwatch/protocol"
-)
-
-// Types used by the server, matching service types.
-type (
-	Info         = service.Info
-	BatteryInfo  = service.BatteryInfo
-	ScanResult   = service.ScanResult
-	DeviceStatus = service.DeviceStatus
-	SleepStatus  = service.SleepStatus
-	SleepSession = service.SleepSession
 )
 
 type Service interface {
 	Health(context.Context) error
-	Info(context.Context) (*Info, error)
+	State(context.Context, api.StateOptions) (*api.AppState, error)
 	TriggerShutdown(context.Context) error
-	DeviceConnected(context.Context) bool
-	DeviceBattery(context.Context) (*BatteryInfo, error)
-	DeviceSetTime(context.Context, time.Time) error
-	DeviceFind(context.Context) error
-	DeviceScan(context.Context) ([]ScanResult, error)
+	DeviceScan(context.Context) ([]api.ScanResult, error)
 	DeviceSetPairedDevice(context.Context, string, string) error
 	DeviceUnpair(context.Context) error
-	DeviceStatus(context.Context) (*DeviceStatus, error)
-	DeviceGetHRLog(ctx context.Context, day protocol.Day) ([]protocol.HRSample, error)
-	DeviceGetSteps(ctx context.Context, dayOffset int) ([]protocol.SportDetail, error)
-	DeviceGetSleep(ctx context.Context) ([]protocol.SleepSession, error)
-	DeviceGetSpO2(ctx context.Context, daysAgo int) ([]protocol.SpO2Day, error)
+	DeviceSetTime(context.Context, time.Time) error
+	DeviceFind(context.Context) error
 	DeviceRealtimeRead(ctx context.Context, rt protocol.RtType) (*protocol.RtReading, error)
 	DeviceRealtimeStart(ctx context.Context, rt protocol.RtType) error
 	DeviceRealtimeStop(ctx context.Context, rt protocol.RtType) error
-	SleepStatus(ctx context.Context) (*SleepStatus, error)
-	SleepSessions(ctx context.Context, from, to time.Time) ([]SleepSession, error)
 	SleepSync(ctx context.Context) error
 }
 
@@ -61,35 +44,21 @@ func New(svc Service, logger *slog.Logger) *Server {
 	mux := http.NewServeMux()
 	s := &Server{service: svc, logger: logger}
 
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /info", s.handleInfo)
-	mux.HandleFunc("POST /shutdown", s.handleShutdown)
+	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/state", s.handleState)
+	mux.HandleFunc("POST /api/actions/shutdown", s.handleShutdown)
+	mux.HandleFunc("POST /api/actions/scan", s.handleScan)
+	mux.HandleFunc("POST /api/actions/pair", s.handlePair)
+	mux.HandleFunc("POST /api/actions/unpair", s.handleUnpair)
+	mux.HandleFunc("POST /api/actions/sync-time", s.handleSyncTime)
+	mux.HandleFunc("POST /api/actions/find-device", s.handleFindDevice)
+	mux.HandleFunc("POST /api/actions/sleep-sync", s.handleSleepSync)
+	mux.HandleFunc("POST /api/actions/realtime-read", s.handleRealtimeRead)
+	mux.HandleFunc("POST /api/actions/realtime-start", s.handleRealtimeStart)
+	mux.HandleFunc("POST /api/actions/realtime-stop", s.handleRealtimeStop)
 
-	mux.HandleFunc("GET /device/connected", s.handleDeviceConnected)
-	mux.HandleFunc("GET /device/battery", s.handleDeviceBattery)
-	mux.HandleFunc("POST /device/time", s.handleDeviceSetTime)
-	mux.HandleFunc("POST /device/find", s.handleDeviceFind)
-
-	mux.HandleFunc("GET /device/scan", s.handleDeviceScan)
-	mux.HandleFunc("POST /device/pair", s.handleDevicePair)
-	mux.HandleFunc("POST /device/unpair", s.handleDeviceUnpair)
-	mux.HandleFunc("GET /device/status", s.handleDeviceStatus)
-
-	mux.HandleFunc("GET /device/hr-log", s.handleDeviceHRLog)
-	mux.HandleFunc("GET /device/steps", s.handleDeviceSteps)
-	mux.HandleFunc("GET /device/sleep", s.handleDeviceSleep)
-	mux.HandleFunc("GET /device/spo2", s.handleDeviceSpO2)
-	mux.HandleFunc("POST /device/realtime/read", s.handleRealtimeRead)
-	mux.HandleFunc("POST /device/realtime/start", s.handleRealtimeStart)
-	mux.HandleFunc("POST /device/realtime/stop", s.handleRealtimeStop)
-
-	mux.HandleFunc("GET /sleep/status", s.handleSleepStatus)
-	mux.HandleFunc("GET /sleep/sessions", s.handleSleepSessions)
-	mux.HandleFunc("POST /sleep/sync", s.handleSleepSync)
-
-	// Keep the TCP listener loopback-only. ddctl uses the Unix socket; the TCP
-	// listener is for local development/debugging and should not expose device
-	// controls to the LAN by default.
+	// Loopback-only. ddctl uses the Unix socket; the TCP listener is for local
+	// development and the eventual local web UI.
 	s.http = &http.Server{Addr: "127.0.0.1:8080", Handler: mux}
 	s.unix = &http.Server{Handler: mux}
 	return s
@@ -160,14 +129,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok\n"))
 }
 
-func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
-	info, err := s.service.Info(r.Context())
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	opts, err := parseStateOptions(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	state, err := s.service.State(r.Context(), opts)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	writeJSON(w, http.StatusOK, state)
 }
 
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
@@ -175,61 +148,26 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("shutting down\n"))
+	writeJSON(w, http.StatusAccepted, api.ActionResult{Message: "shutting down"})
 }
 
-func (s *Server) handleDeviceConnected(w http.ResponseWriter, r *http.Request) {
-	connected := s.service.DeviceConnected(r.Context())
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"connected": connected})
-}
-
-func (s *Server) handleDeviceBattery(w http.ResponseWriter, r *http.Request) {
-	info, err := s.service.DeviceBattery(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
-}
-
-func (s *Server) handleDeviceSetTime(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.DeviceSetTime(r.Context(), time.Now()); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("time synced\n"))
-}
-
-func (s *Server) handleDeviceFind(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.DeviceFind(r.Context()); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("finding device\n"))
-}
-
-func (s *Server) handleDeviceScan(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	results, err := s.service.DeviceScan(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(results)
+	state, err := s.service.State(r.Context(), api.StateOptions{})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.ActionResult{ScanResults: results, State: state})
 }
 
-func (s *Server) handleDevicePair(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Addr string `json:"addr"`
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
+	var req api.PairRequest
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Addr == "" {
@@ -240,90 +178,39 @@ func (s *Server) handleDevicePair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("connecting\n"))
+	s.writeActionState(w, r, http.StatusAccepted, "connecting")
 }
 
-func (s *Server) handleDeviceUnpair(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleUnpair(w http.ResponseWriter, r *http.Request) {
 	if err := s.service.DeviceUnpair(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("unpaired\n"))
+	s.writeActionState(w, r, http.StatusAccepted, "unpaired")
 }
 
-func (s *Server) handleDeviceStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := s.service.DeviceStatus(r.Context())
-	if err != nil {
+func (s *Server) handleSyncTime(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeviceSetTime(r.Context(), time.Now()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	s.writeActionState(w, r, http.StatusAccepted, "time synced")
 }
 
-func (s *Server) handleDeviceHRLog(w http.ResponseWriter, r *http.Request) {
-	day, err := parseDay(r.URL.Query().Get("day"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	samples, err := s.service.DeviceGetHRLog(r.Context(), day)
-	if err != nil {
+func (s *Server) handleFindDevice(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeviceFind(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(samples)
+	s.writeActionState(w, r, http.StatusAccepted, "finding device")
 }
 
-func (s *Server) handleDeviceSteps(w http.ResponseWriter, r *http.Request) {
-	offset := 0
-	if v := r.URL.Query().Get("offset"); v != "" {
-		var err error
-		offset, err = strconv.Atoi(v)
-		if err != nil {
-			http.Error(w, "invalid offset", http.StatusBadRequest)
-			return
-		}
-	}
-	details, err := s.service.DeviceGetSteps(r.Context(), offset)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func (s *Server) handleSleepSync(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.SleepSync(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(details)
-}
-
-func (s *Server) handleDeviceSleep(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.service.DeviceGetSleep(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sessions)
-}
-
-func (s *Server) handleDeviceSpO2(w http.ResponseWriter, r *http.Request) {
-	daysAgo := 0
-	if v := r.URL.Query().Get("days_ago"); v != "" {
-		var err error
-		daysAgo, err = strconv.Atoi(v)
-		if err != nil {
-			http.Error(w, "invalid days_ago", http.StatusBadRequest)
-			return
-		}
-	}
-	days, err := s.service.DeviceGetSpO2(r.Context(), daysAgo)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(days)
+	s.writeActionState(w, r, http.StatusAccepted, "sleep synced")
 }
 
 func (s *Server) handleRealtimeRead(w http.ResponseWriter, r *http.Request) {
@@ -336,8 +223,12 @@ func (s *Server) handleRealtimeRead(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(reading)
+	state, err := s.service.State(r.Context(), api.StateOptions{})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.ActionResult{RealtimeReading: reading, State: state})
 }
 
 func (s *Server) handleRealtimeStart(w http.ResponseWriter, r *http.Request) {
@@ -349,8 +240,7 @@ func (s *Server) handleRealtimeStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("started\n"))
+	s.writeActionState(w, r, http.StatusAccepted, "started")
 }
 
 func (s *Server) handleRealtimeStop(w http.ResponseWriter, r *http.Request) {
@@ -362,55 +252,21 @@ func (s *Server) handleRealtimeStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("stopped\n"))
+	s.writeActionState(w, r, http.StatusAccepted, "stopped")
 }
 
-func (s *Server) handleSleepStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := s.service.SleepStatus(r.Context())
+func (s *Server) writeActionState(w http.ResponseWriter, r *http.Request, code int, message string) {
+	state, err := s.service.State(r.Context(), api.StateOptions{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
-}
-
-func (s *Server) handleSleepSessions(w http.ResponseWriter, r *http.Request) {
-	from, err := parseOptionalTime(r.URL.Query().Get("from"))
-	if err != nil {
-		http.Error(w, "invalid from: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	to, err := parseOptionalTime(r.URL.Query().Get("to"))
-	if err != nil {
-		http.Error(w, "invalid to: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	sessions, err := s.service.SleepSessions(r.Context(), from, to)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sessions)
-}
-
-func (s *Server) handleSleepSync(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.SleepSync(r.Context()); err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("sleep synced\n"))
+	writeJSON(w, code, api.ActionResult{Message: message, State: state})
 }
 
 func decodeRealtimeType(w http.ResponseWriter, r *http.Request) (protocol.RtType, bool) {
-	var req struct {
-		Type int `json:"type"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+	var req api.RealtimeRequest
+	if !decodeJSON(w, r, &req) {
 		return 0, false
 	}
 	if req.Type == 0 {
@@ -419,15 +275,41 @@ func decodeRealtimeType(w http.ResponseWriter, r *http.Request) (protocol.RtType
 	return protocol.RtType(req.Type), true
 }
 
-func parseDay(s string) (protocol.Day, error) {
-	if s == "" || s == "today" {
-		return protocol.Today(), nil
-	}
-	t, err := time.Parse("2006-01-02", s)
+func parseStateOptions(r *http.Request) (api.StateOptions, error) {
+	q := r.URL.Query()
+	day, err := parseDay(q.Get("day"))
 	if err != nil {
-		return protocol.Day{}, fmt.Errorf("invalid day format (use YYYY-MM-DD or \"today\"): %w", err)
+		return api.StateOptions{}, err
 	}
-	return protocol.Day{Year: t.Year(), Month: t.Month(), Day: t.Day()}, nil
+	from, err := parseOptionalTime(q.Get("from"))
+	if err != nil {
+		return api.StateOptions{}, fmt.Errorf("invalid from: %w", err)
+	}
+	to, err := parseOptionalTime(q.Get("to"))
+	if err != nil {
+		return api.StateOptions{}, fmt.Errorf("invalid to: %w", err)
+	}
+	includeWatch, watchKinds := parseWatchHistory(q.Get("watch_history"))
+	return api.StateOptions{
+		Day:                 day,
+		From:                from,
+		To:                  to,
+		IncludeHistory:      boolQuery(q.Get("history")) || includeWatch,
+		IncludeWatchHistory: includeWatch,
+		WatchHistoryKinds:   watchKinds,
+	}, nil
+}
+
+func parseDay(s string) (time.Time, error) {
+	if s == "" || s == "today" {
+		now := time.Now()
+		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local), nil
+	}
+	t, err := time.ParseInLocation("2006-01-02", s, time.Local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid day format (use YYYY-MM-DD or today): %w", err)
+	}
+	return t, nil
 }
 
 func parseOptionalTime(s string) (time.Time, error) {
@@ -437,8 +319,53 @@ func parseOptionalTime(s string) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
+	if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
 		return t, nil
 	}
 	return time.Time{}, fmt.Errorf("use RFC3339 timestamp or YYYY-MM-DD")
+}
+
+func boolQuery(s string) bool {
+	if s == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(s)
+	return err == nil && v
+}
+
+func parseWatchHistory(s string) (bool, map[string]bool) {
+	if s == "" {
+		return false, nil
+	}
+	if boolQuery(s) {
+		return true, nil // true means all watch-backed history.
+	}
+	kinds := make(map[string]bool)
+	for _, part := range strings.Split(s, ",") {
+		kind := strings.TrimSpace(part)
+		if kind != "" {
+			kinds[kind] = true
+		}
+	}
+	return len(kinds) > 0, kinds
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) bool {
+	if r.Body == nil {
+		return true
+	}
+	if err := json.NewDecoder(r.Body).Decode(dest); err != nil {
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, code int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(value)
 }

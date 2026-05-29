@@ -1,61 +1,38 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strconv"
+
+	"smartwatch/internal/api"
 )
 
 func doRealtime(client *http.Client) {
 	rtType := parseRealtimeArg()
-	body, _ := json.Marshal(map[string]int{"type": rtType})
-	resp, err := client.Post("http://localhost/device/realtime/read", "application/json", bytes.NewReader(body))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	body, _ := json.Marshal(api.RealtimeRequest{Type: rtType})
+	result := postAction(client, "realtime-read", body)
+	if result.RealtimeReading == nil {
+		fmt.Fprintln(os.Stderr, "error: no realtime reading returned")
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(os.Stderr, resp.Body)
-		fmt.Fprintln(os.Stderr)
-		os.Exit(1)
-	}
-	var reading realtimeReading
-	if err := json.NewDecoder(resp.Body).Decode(&reading); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("%s: %d\n", realtimeName(reading.Kind), reading.Value)
+	fmt.Printf("%s: %d\n", realtimeName(int(result.RealtimeReading.Kind)), result.RealtimeReading.Value)
 }
 
 func doRealtimeStart(client *http.Client) {
 	rtType := parseRealtimeArg()
-	body, _ := json.Marshal(map[string]int{"type": rtType})
-	resp, err := client.Post("http://localhost/device/realtime/start", "application/json", bytes.NewReader(body))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
-	fmt.Println()
+	body, _ := json.Marshal(api.RealtimeRequest{Type: rtType})
+	result := postAction(client, "realtime-start", body)
+	printActionMessage(result)
 }
 
 func doRealtimeStop(client *http.Client) {
 	rtType := parseRealtimeArg()
-	body, _ := json.Marshal(map[string]int{"type": rtType})
-	resp, err := client.Post("http://localhost/device/realtime/stop", "application/json", bytes.NewReader(body))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
-	fmt.Println()
+	body, _ := json.Marshal(api.RealtimeRequest{Type: rtType})
+	result := postAction(client, "realtime-stop", body)
+	printActionMessage(result)
 }
 
 func parseRealtimeArg() int {
