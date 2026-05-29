@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"smartwatch/internal/api"
+	"smartwatch/internal/web"
 	"smartwatch/protocol"
 )
 
@@ -42,7 +43,11 @@ type Server struct {
 
 func New(svc Service, logger *slog.Logger) *Server {
 	mux := http.NewServeMux()
-	s := &Server{service: svc, logger: logger}
+	httpAddr := envString("DONNIED_HTTP_ADDR", "0.0.0.0:80")
+	s := &Server{
+		service: svc,
+		logger:  logger,
+	}
 
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/state", s.handleState)
@@ -56,10 +61,13 @@ func New(svc Service, logger *slog.Logger) *Server {
 	mux.HandleFunc("POST /api/actions/realtime-read", s.handleRealtimeRead)
 	mux.HandleFunc("POST /api/actions/realtime-start", s.handleRealtimeStart)
 	mux.HandleFunc("POST /api/actions/realtime-stop", s.handleRealtimeStop)
+	mux.HandleFunc("GET /api", http.NotFound)
+	mux.HandleFunc("GET /api/", http.NotFound)
+	mux.Handle("GET /", web.Handler())
 
-	// Loopback-only. ddctl uses the Unix socket; the TCP listener is for local
-	// development and the eventual local web UI.
-	s.http = &http.Server{Addr: "127.0.0.1:8080", Handler: mux}
+	// ddctl uses the Unix socket. The TCP listener serves the browser UI.
+	// By default it is available on the LAN by IP address.
+	s.http = &http.Server{Addr: httpAddr, Handler: mux}
 	s.unix = &http.Server{Handler: mux}
 	return s
 }
@@ -82,7 +90,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("tcp listen: %w", err)
 	}
 
-	s.logger.Info("http server listening", "addr", s.http.Addr)
+	s.logger.Info("http server listening", "addr", tcpLn.Addr().String(), "configured_addr", s.http.Addr, "urls", httpURLs(tcpLn))
 	s.logger.Info("unix socket listening", "path", socketPath)
 
 	httpErrCh := make(chan error, 1)
@@ -118,6 +126,65 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+func envString(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func httpURLs(tcpLn net.Listener) []string {
+	tcpAddr, ok := tcpLn.Addr().(*net.TCPAddr)
+	if !ok || tcpAddr.Port <= 0 {
+		return nil
+	}
+	urls := []string{httpURL("127.0.0.1", tcpAddr.Port)}
+	for _, ip := range lanIPs() {
+		urls = append(urls, httpURL(ip.String(), tcpAddr.Port))
+	}
+	return urls
+}
+
+func httpURL(host string, port int) string {
+	if port == 80 {
+		return fmt.Sprintf("http://%s/", host)
+	}
+	return fmt.Sprintf("http://%s:%d/", host, port)
+}
+
+func lanIPs() []net.IP {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var ips []net.IP
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				ips = append(ips, ip4)
+			}
+		}
+	}
+	return ips
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

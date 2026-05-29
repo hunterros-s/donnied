@@ -1,0 +1,23 @@
+{
+  "name": "smartwatch-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "echarts": "^6.1.0",
+    "lucide-preact": "^1.17.0",
+    "preact": "^10.27.2"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.2",
+    "@tailwindcss/vite": "^4.3.0",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6"
+  }
+}

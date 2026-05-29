@@ -5,3 +5,8 @@
 *.db-wal
 *.sqlite
 *.sqlite3
+
+# Frontend dependencies/build cache.
+frontend/node_modules/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
