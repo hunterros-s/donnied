@@ -395,15 +395,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--op-timeout", type=float, default=5, help="Timeout for BLE write/notify operations")
     p.add_argument("--disconnect-timeout", type=float, default=3, help="Timeout for BLE disconnect")
     p.add_argument("--print-unknown", action="store_true", help="Print non-raw/unknown V1 notifications")
-    # Backwards-compatible no-op/alias options from earlier versions.
-    p.add_argument("--max-watchdog-restarts", type=int, default=0, help=argparse.SUPPRESS)
-    p.add_argument("--restart-delay", type=float, default=0, help=argparse.SUPPRESS)
-    p.add_argument("--ble-timeout", type=float, help=argparse.SUPPRESS)
-    args = p.parse_args()
-    if args.ble_timeout is not None:
-        args.op_timeout = args.ble_timeout
-        args.disconnect_timeout = args.ble_timeout
-    return args
+    return p.parse_args()
 
 
 def main() -> None:
