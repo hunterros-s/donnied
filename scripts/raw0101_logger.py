@@ -221,8 +221,14 @@ def print_reading(r: RawReading) -> None:
 async def find_device(address: Optional[str], name: Optional[str], scan_timeout: float):
     if BleakScanner is None:
         raise RuntimeError("Missing dependency: bleak. Install with: python3 -m pip install bleak")
+
     if address:
-        return address
+        print(f"Scanning for {address} for {scan_timeout:g}s...", flush=True)
+        dev = await BleakScanner.find_device_by_address(address, timeout=scan_timeout)
+        if not dev:
+            raise RuntimeError(f"Device not found while scanning: {address}")
+        print(f"Found {dev.address} name={dev.name!r}", flush=True)
+        return dev
 
     print(f"Scanning for watch/ring for {scan_timeout:g}s...", flush=True)
     name_lc = name.lower() if name else None
@@ -238,7 +244,7 @@ async def find_device(address: Optional[str], name: Optional[str], scan_timeout:
     if not dev:
         raise RuntimeError("No matching device found. Pass --address or --name.")
     print(f"Found {dev.address} name={dev.name!r}", flush=True)
-    return dev.address
+    return dev
 
 
 @dataclass
@@ -288,46 +294,48 @@ async def maybe_wait_until(deadline: Optional[float], seconds: float) -> None:
         await asyncio.sleep(min(seconds, remaining))
 
 
-async def cleanup_client(client, args: argparse.Namespace, stream_started: bool, notify_started: bool) -> None:
+async def cleanup_client(client, args: argparse.Namespace, send_stop: bool) -> None:
     if not getattr(client, "is_connected", False):
         return
 
-    stop_packet = build_packet(CMD_RAW_SENSOR, RAW_STOP)
-
-    if stream_started:
+    if send_stop:
+        stop_packet = build_packet(CMD_RAW_SENSOR, RAW_STOP)
         try:
             await asyncio.wait_for(client.write_gatt_char(UART_WRITE, stop_packet, response=False), timeout=args.op_timeout)
         except Exception as e:
             print(f"Raw stop skipped/failed: {describe_error(e)}", flush=True)
 
-    if notify_started:
-        try:
-            await asyncio.wait_for(client.stop_notify(UART_NOTIFY), timeout=args.op_timeout)
-        except Exception as e:
-            print(f"Stop notify skipped/failed: {describe_error(e)}", flush=True)
-
+    # Bleak stops notifications automatically on disconnect. Avoid stop_notify here:
+    # it is another GATT operation that can hang/fail when CoreBluetooth is stale.
     try:
         await asyncio.wait_for(client.disconnect(), timeout=args.disconnect_timeout)
     except Exception as e:
         print(f"Disconnect skipped/failed: {describe_error(e)}", flush=True)
 
 
-async def run_session(address: str, conn: sqlite3.Connection, args: argparse.Namespace, state: RuntimeState, deadline: Optional[float]) -> str:
+async def run_session(device, conn: sqlite3.Connection, args: argparse.Namespace, state: RuntimeState, deadline: Optional[float]) -> str:
     """Run one BLE connection. Return why it ended: disconnected/stalled/done/error."""
     start_packet = build_packet(CMD_RAW_SENSOR, bytes.fromhex(args.payload))
+    stop_packet = build_packet(CMD_RAW_SENSOR, RAW_STOP)
+    address = device.address
     disconnected = asyncio.Event()
     loop = asyncio.get_running_loop()
 
     def on_disconnect(_client):
         loop.call_soon_threadsafe(disconnected.set)
 
-    client = BleakClient(address, disconnected_callback=on_disconnect)
-    notify_started = False
+    client = BleakClient(
+        device,
+        disconnected_callback=on_disconnect,
+        services=[UART_SERVICE],
+        timeout=args.connect_timeout,
+    )
     stream_started = False
+    end_reason = "error"
 
     try:
         print(f"Connecting to {address}...", flush=True)
-        await asyncio.wait_for(client.connect(), timeout=args.connect_timeout)
+        await client.connect()
         if not client.is_connected:
             raise RuntimeError("BLE connect returned but client is not connected")
 
@@ -336,7 +344,13 @@ async def run_session(address: str, conn: sqlite3.Connection, args: argparse.Nam
             client.start_notify(UART_NOTIFY, make_notify_handler(conn, address, args, state)),
             timeout=args.op_timeout,
         )
-        notify_started = True
+
+        # Reset any old raw mode left on the watch from a previous stale session.
+        try:
+            await asyncio.wait_for(client.write_gatt_char(UART_WRITE, stop_packet, response=False), timeout=args.op_timeout)
+            await asyncio.sleep(args.start_delay)
+        except Exception as e:
+            print(f"Initial raw stop skipped/failed: {describe_error(e)}", flush=True)
 
         print(f"Starting raw sensors: {start_packet.hex()}  db={args.db}", flush=True)
         await asyncio.wait_for(client.write_gatt_char(UART_WRITE, start_packet, response=False), timeout=args.op_timeout)
@@ -345,26 +359,32 @@ async def run_session(address: str, conn: sqlite3.Connection, args: argparse.Nam
 
         while True:
             if deadline is not None and time.monotonic() >= deadline:
-                return "done"
+                end_reason = "done"
+                return end_reason
 
             try:
                 await asyncio.wait_for(disconnected.wait(), timeout=1.0)
-                return "disconnected"
+                end_reason = "disconnected"
+                return end_reason
             except asyncio.TimeoutError:
                 pass
 
             if args.watchdog > 0 and time.monotonic() - state.last_seen > args.watchdog:
                 print(f"No raw packets for {args.watchdog:g}s; reconnecting BLE...", flush=True)
-                return "stalled"
+                end_reason = "stalled"
+                return end_reason
+    except asyncio.CancelledError:
+        end_reason = "cancelled"
+        raise
     finally:
-        await cleanup_client(client, args, stream_started, notify_started)
+        send_stop = stream_started and end_reason not in ("stalled", "disconnected")
+        await cleanup_client(client, args, send_stop)
 
 
 async def run(args: argparse.Namespace) -> None:
     if BleakClient is None:
         raise RuntimeError("Missing dependency: bleak. Install with: python3 -m pip install bleak")
 
-    address = await find_device(args.address, args.name, args.scan_timeout)
     conn = init_db(args.db)
     state = RuntimeState(last_seen=time.monotonic())
     deadline = time.monotonic() + args.seconds if args.seconds and args.seconds > 0 else None
@@ -372,7 +392,8 @@ async def run(args: argparse.Namespace) -> None:
     try:
         while deadline is None or time.monotonic() < deadline:
             try:
-                reason = await run_session(address, conn, args, state, deadline)
+                device = await find_device(args.address, args.name, args.scan_timeout)
+                reason = await run_session(device, conn, args, state, deadline)
                 print(f"Session ended: {reason}; reconnecting in {args.reconnect_delay:g}s...", flush=True)
             except Exception as e:
                 print(f"Session error: {describe_error(e)}; reconnecting in {args.reconnect_delay:g}s...", flush=True)
@@ -390,6 +411,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan-timeout", type=float, default=10, help="Scan timeout when --address omitted")
     p.add_argument("--payload", default="0101", help="Raw A1 payload hex. Default: 0101")
     p.add_argument("--watchdog", type=float, default=10, help="Reconnect BLE after N seconds without packets. 0 disables.")
+    p.add_argument("--start-delay", type=float, default=0.2, help="Pause between initial raw stop and raw start")
     p.add_argument("--reconnect-delay", type=float, default=5, help="Seconds to wait before reconnecting")
     p.add_argument("--connect-timeout", type=float, default=30, help="Timeout for BLE connect")
     p.add_argument("--op-timeout", type=float, default=5, help="Timeout for BLE write/notify operations")
