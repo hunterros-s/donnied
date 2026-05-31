@@ -249,9 +249,10 @@ async def run(args: argparse.Namespace) -> None:
     previous_accel: Optional[RawReading] = None
     seen = 0
     last_seen = time.monotonic()
+    watchdog_restarts = 0
 
     def on_notify(_sender, data: bytearray):
-        nonlocal previous_accel, seen, last_seen
+        nonlocal previous_accel, seen, last_seen, watchdog_restarts
         raw = bytes(data)
         # Usually exactly one 16-byte packet. Handle multiples defensively.
         packets = [raw[i : i + PACKET_LEN] for i in range(0, len(raw), PACKET_LEN)]
@@ -269,6 +270,7 @@ async def run(args: argparse.Namespace) -> None:
             print_reading(r)
             seen += 1
             last_seen = time.monotonic()
+            watchdog_restarts = 0
 
     start_packet = build_packet(CMD_RAW_SENSOR, bytes.fromhex(args.payload))
     stop_packet = build_packet(CMD_RAW_SENSOR, RAW_STOP)
@@ -296,6 +298,7 @@ async def run(args: argparse.Namespace) -> None:
                     print(f"Starting raw sensors: {start_packet.hex()}  db={args.db}", flush=True)
                     await client.write_gatt_char(UART_WRITE, start_packet, response=False)
                     last_seen = time.monotonic()
+                    watchdog_restarts = 0
 
                     try:
                         while True:
@@ -308,10 +311,21 @@ async def run(args: argparse.Namespace) -> None:
                                 pass
 
                             if args.watchdog > 0 and time.monotonic() - last_seen > args.watchdog:
-                                print(f"No raw packets for {args.watchdog:g}s; restarting raw stream...", flush=True)
+                                watchdog_restarts += 1
+                                if watchdog_restarts > args.max_watchdog_restarts:
+                                    print(
+                                        f"No raw packets after {args.max_watchdog_restarts} restart attempt(s); reconnecting BLE...",
+                                        flush=True,
+                                    )
+                                    break
+                                print(
+                                    f"No raw packets for {args.watchdog:g}s; restarting raw stream "
+                                    f"({watchdog_restarts}/{args.max_watchdog_restarts})...",
+                                    flush=True,
+                                )
                                 try:
                                     await client.write_gatt_char(UART_WRITE, stop_packet, response=False)
-                                    await asyncio.sleep(0.2)
+                                    await asyncio.sleep(args.restart_delay)
                                     await client.write_gatt_char(UART_WRITE, start_packet, response=False)
                                     last_seen = time.monotonic()
                                 except Exception as e:
@@ -348,6 +362,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan-timeout", type=float, default=10, help="Scan timeout when --address omitted")
     p.add_argument("--payload", default="0101", help="Raw A1 payload hex. Default: 0101")
     p.add_argument("--watchdog", type=float, default=10, help="Restart raw stream after N seconds without packets. 0 disables.")
+    p.add_argument("--max-watchdog-restarts", type=int, default=2, help="Reconnect BLE after this many no-packet stream restarts")
+    p.add_argument("--restart-delay", type=float, default=0.5, help="Pause between A1 stop and A1 start during stream restart")
     p.add_argument("--reconnect-delay", type=float, default=5, help="Seconds to wait before reconnecting")
     p.add_argument("--print-unknown", action="store_true", help="Print non-raw/unknown V1 notifications")
     return p.parse_args()
