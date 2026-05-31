@@ -252,6 +252,7 @@ class RuntimeState:
     previous_accel: Optional[RawReading] = None
     seen: int = 0
     last_seen: float = 0.0
+    stream_restarts: int = 0
 
 
 def make_notify_handler(conn: sqlite3.Connection, address: str, args: argparse.Namespace, state: RuntimeState):
@@ -274,6 +275,7 @@ def make_notify_handler(conn: sqlite3.Connection, address: str, args: argparse.N
             print_reading(r)
             state.seen += 1
             state.last_seen = time.monotonic()
+            state.stream_restarts = 0
 
     return on_notify
 
@@ -311,6 +313,24 @@ async def cleanup_client(client, args: argparse.Namespace, send_stop: bool) -> N
         await asyncio.wait_for(client.disconnect(), timeout=args.disconnect_timeout)
     except Exception as e:
         print(f"Disconnect skipped/failed: {describe_error(e)}", flush=True)
+
+
+async def restart_stream(client, stop_packet: bytes, start_packet: bytes, args: argparse.Namespace, state: RuntimeState) -> bool:
+    state.stream_restarts += 1
+    print(
+        f"No raw packets for {args.watchdog:g}s; restarting raw stream "
+        f"({state.stream_restarts}/{args.stream_restarts})...",
+        flush=True,
+    )
+    try:
+        await asyncio.wait_for(client.write_gatt_char(UART_WRITE, stop_packet, response=False), timeout=args.op_timeout)
+        await asyncio.sleep(args.restart_delay)
+        await asyncio.wait_for(client.write_gatt_char(UART_WRITE, start_packet, response=False), timeout=args.op_timeout)
+        state.last_seen = time.monotonic()
+        return True
+    except Exception as e:
+        print(f"Raw stream restart failed: {describe_error(e)}", flush=True)
+        return False
 
 
 async def run_session(device, conn: sqlite3.Connection, args: argparse.Namespace, state: RuntimeState, deadline: Optional[float]) -> str:
@@ -356,6 +376,7 @@ async def run_session(device, conn: sqlite3.Connection, args: argparse.Namespace
         await asyncio.wait_for(client.write_gatt_char(UART_WRITE, start_packet, response=False), timeout=args.op_timeout)
         stream_started = True
         state.last_seen = time.monotonic()
+        state.stream_restarts = 0
 
         while True:
             if deadline is not None and time.monotonic() >= deadline:
@@ -370,6 +391,9 @@ async def run_session(device, conn: sqlite3.Connection, args: argparse.Namespace
                 pass
 
             if args.watchdog > 0 and time.monotonic() - state.last_seen > args.watchdog:
+                if state.stream_restarts < args.stream_restarts:
+                    if await restart_stream(client, stop_packet, start_packet, args, state):
+                        continue
                 print(f"No raw packets for {args.watchdog:g}s; reconnecting BLE...", flush=True)
                 end_reason = "stalled"
                 return end_reason
@@ -389,10 +413,20 @@ async def run(args: argparse.Namespace) -> None:
     state = RuntimeState(last_seen=time.monotonic())
     deadline = time.monotonic() + args.seconds if args.seconds and args.seconds > 0 else None
 
+    device = None
+
     try:
         while deadline is None or time.monotonic() < deadline:
             try:
-                device = await find_device(args.address, args.name, args.scan_timeout)
+                try:
+                    device = await find_device(args.address, args.name, args.scan_timeout)
+                except Exception as e:
+                    if device is None:
+                        raise
+                    print(
+                        f"Scan failed ({describe_error(e)}); trying cached device {device.address}...",
+                        flush=True,
+                    )
                 reason = await run_session(device, conn, args, state, deadline)
                 print(f"Session ended: {reason}; reconnecting in {args.reconnect_delay:g}s...", flush=True)
             except Exception as e:
@@ -410,8 +444,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seconds", type=float, default=0, help="Run duration. 0 means until Ctrl-C.")
     p.add_argument("--scan-timeout", type=float, default=10, help="Scan timeout when --address omitted")
     p.add_argument("--payload", default="0101", help="Raw A1 payload hex. Default: 0101")
-    p.add_argument("--watchdog", type=float, default=10, help="Reconnect BLE after N seconds without packets. 0 disables.")
+    p.add_argument("--watchdog", type=float, default=10, help="Recover after N seconds without packets. 0 disables.")
+    p.add_argument("--stream-restarts", type=int, default=2, help="Raw stream restarts to try before full BLE reconnect")
     p.add_argument("--start-delay", type=float, default=0.2, help="Pause between initial raw stop and raw start")
+    p.add_argument("--restart-delay", type=float, default=0.5, help="Pause between raw stop and raw start during stream restart")
     p.add_argument("--reconnect-delay", type=float, default=5, help="Seconds to wait before reconnecting")
     p.add_argument("--connect-timeout", type=float, default=30, help="Timeout for BLE connect")
     p.add_argument("--op-timeout", type=float, default=5, help="Timeout for BLE write/notify operations")
