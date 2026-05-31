@@ -275,6 +275,7 @@ async def run(args: argparse.Namespace) -> None:
     start_packet = build_packet(CMD_RAW_SENSOR, bytes.fromhex(args.payload))
     stop_packet = build_packet(CMD_RAW_SENSOR, RAW_STOP)
     deadline = time.monotonic() + args.seconds if args.seconds and args.seconds > 0 else None
+    loop = asyncio.get_running_loop()
 
     try:
         while True:
@@ -285,65 +286,70 @@ async def run(args: argparse.Namespace) -> None:
 
             def on_disconnect(_client):
                 print("Disconnected; reconnecting...", flush=True)
-                disconnected.set()
+                loop.call_soon_threadsafe(disconnected.set)
 
+            client = BleakClient(address, disconnected_callback=on_disconnect)
             try:
                 print(f"Connecting to {address}...", flush=True)
-                async with BleakClient(address, disconnected_callback=on_disconnect) as client:
-                    if not client.is_connected:
-                        raise RuntimeError("BLE connect failed")
-                    print("Connected. Enabling notifications...", flush=True)
-                    await client.start_notify(UART_NOTIFY, on_notify)
+                await asyncio.wait_for(client.connect(), timeout=args.ble_timeout)
+                if not client.is_connected:
+                    raise RuntimeError("BLE connect failed")
 
-                    print(f"Starting raw sensors: {start_packet.hex()}  db={args.db}", flush=True)
-                    await client.write_gatt_char(UART_WRITE, start_packet, response=False)
-                    last_seen = time.monotonic()
-                    watchdog_restarts = 0
+                print("Connected. Enabling notifications...", flush=True)
+                await asyncio.wait_for(client.start_notify(UART_NOTIFY, on_notify), timeout=args.ble_timeout)
 
+                print(f"Starting raw sensors: {start_packet.hex()}  db={args.db}", flush=True)
+                await asyncio.wait_for(client.write_gatt_char(UART_WRITE, start_packet, response=False), timeout=args.ble_timeout)
+                last_seen = time.monotonic()
+                watchdog_restarts = 0
+
+                while True:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return
                     try:
-                        while True:
-                            if deadline is not None and time.monotonic() >= deadline:
-                                return
-                            try:
-                                await asyncio.wait_for(disconnected.wait(), timeout=1.0)
-                                break
-                            except asyncio.TimeoutError:
-                                pass
+                        await asyncio.wait_for(disconnected.wait(), timeout=1.0)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
 
-                            if args.watchdog > 0 and time.monotonic() - last_seen > args.watchdog:
-                                watchdog_restarts += 1
-                                if watchdog_restarts > args.max_watchdog_restarts:
-                                    print(
-                                        f"No raw packets after {args.max_watchdog_restarts} restart attempt(s); reconnecting BLE...",
-                                        flush=True,
-                                    )
-                                    break
-                                print(
-                                    f"No raw packets for {args.watchdog:g}s; restarting raw stream "
-                                    f"({watchdog_restarts}/{args.max_watchdog_restarts})...",
-                                    flush=True,
-                                )
-                                try:
-                                    await client.write_gatt_char(UART_WRITE, stop_packet, response=False)
-                                    await asyncio.sleep(args.restart_delay)
-                                    await client.write_gatt_char(UART_WRITE, start_packet, response=False)
-                                    last_seen = time.monotonic()
-                                except Exception as e:
-                                    print(f"Restart failed: {e}; reconnecting...", flush=True)
-                                    break
-                    finally:
-                        print("Stopping raw sensors...", flush=True)
+                    if args.watchdog > 0 and time.monotonic() - last_seen > args.watchdog:
+                        watchdog_restarts += 1
+                        if watchdog_restarts > args.max_watchdog_restarts:
+                            print(
+                                f"No raw packets after {args.max_watchdog_restarts} restart attempt(s); reconnecting BLE...",
+                                flush=True,
+                            )
+                            break
+                        print(
+                            f"No raw packets for {args.watchdog:g}s; restarting raw stream "
+                            f"({watchdog_restarts}/{args.max_watchdog_restarts})...",
+                            flush=True,
+                        )
                         try:
-                            await client.write_gatt_char(UART_WRITE, stop_packet, response=False)
-                        except Exception:
-                            pass
-                        try:
-                            await client.stop_notify(UART_NOTIFY)
-                        except Exception:
-                            pass
-
+                            await asyncio.wait_for(client.write_gatt_char(UART_WRITE, stop_packet, response=False), timeout=args.ble_timeout)
+                            await asyncio.sleep(args.restart_delay)
+                            await asyncio.wait_for(client.write_gatt_char(UART_WRITE, start_packet, response=False), timeout=args.ble_timeout)
+                            last_seen = time.monotonic()
+                        except Exception as e:
+                            print(f"Restart failed: {e}; reconnecting...", flush=True)
+                            break
             except Exception as e:
                 print(f"Connection error: {e}; retrying in {args.reconnect_delay:g}s...", flush=True)
+            finally:
+                print("Stopping raw sensors...", flush=True)
+                if client.is_connected:
+                    try:
+                        await asyncio.wait_for(client.write_gatt_char(UART_WRITE, stop_packet, response=False), timeout=args.ble_timeout)
+                    except Exception as e:
+                        print(f"Raw stop skipped/failed: {e}", flush=True)
+                    try:
+                        await asyncio.wait_for(client.stop_notify(UART_NOTIFY), timeout=args.ble_timeout)
+                    except Exception as e:
+                        print(f"Stop notify skipped/failed: {e}", flush=True)
+                    try:
+                        await asyncio.wait_for(client.disconnect(), timeout=args.ble_timeout)
+                    except Exception as e:
+                        print(f"Disconnect timed out/failed: {e}", flush=True)
 
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -365,6 +371,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-watchdog-restarts", type=int, default=2, help="Reconnect BLE after this many no-packet stream restarts")
     p.add_argument("--restart-delay", type=float, default=0.5, help="Pause between A1 stop and A1 start during stream restart")
     p.add_argument("--reconnect-delay", type=float, default=5, help="Seconds to wait before reconnecting")
+    p.add_argument("--ble-timeout", type=float, default=5, help="Timeout for BLE connect/write/notify/disconnect operations")
     p.add_argument("--print-unknown", action="store_true", help="Print non-raw/unknown V1 notifications")
     return p.parse_args()
 
