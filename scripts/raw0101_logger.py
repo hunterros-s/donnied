@@ -413,20 +413,10 @@ async def run(args: argparse.Namespace) -> None:
     state = RuntimeState(last_seen=time.monotonic())
     deadline = time.monotonic() + args.seconds if args.seconds and args.seconds > 0 else None
 
-    device = None
-
     try:
         while deadline is None or time.monotonic() < deadline:
             try:
-                try:
-                    device = await find_device(args.address, args.name, args.scan_timeout)
-                except Exception as e:
-                    if device is None:
-                        raise
-                    print(
-                        f"Scan failed ({describe_error(e)}); trying cached device {device.address}...",
-                        flush=True,
-                    )
+                device = await find_device(args.address, args.name, args.scan_timeout)
                 reason = await run_session(device, conn, args, state, deadline)
                 print(f"Session ended: {reason}; reconnecting in {args.reconnect_delay:g}s...", flush=True)
             except Exception as e:
